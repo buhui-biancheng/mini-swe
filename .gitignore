@@ -116,3 +116,6 @@ dmypy.json
 
 # pyenv
 .python-version
+
+# Local rules (not uploaded)
+.local_rules/
