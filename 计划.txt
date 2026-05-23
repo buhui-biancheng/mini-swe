@@ -1,0 +1,168 @@
+
+第1周：基础补强 + 最小闭环（直线版）
+
+目标：端到端跑通单文件Python bug修复（直线流程，不引入复杂状态机）。
+
+P0 任务（必须做扎实，影响主流程）
+
+1. Docker基础 + docker-py
+   · 学会用命令行 docker run/pull/exec
+   · 写一个Python函数 run_in_docker(code_dir, command)，返回stdout/stderr/exit_code
+   · 用AI生成安全参数：限制内存1GB，只读挂载
+2. ast模块提取函数行号
+   · 实现 get_function_line_map(filepath) → {func_name: (start, end)}
+   · 支持类内方法（可选，优先顶层函数）
+3. DeepSeek API调用 + Function Calling
+   · 注册DeepSeek（阿里云百炼或官方），拿到api_key（已经完成）
+   · 使用OpenAI SDK，base_url改为DeepSeek端点
+   · 定义简单工具 search_function(name: str)，让模型返回JSON参数
+4. 直线流程实现
+   · 状态用 if-else：locate → patch → test → (失败则重复patch最多2次)
+   · 不加状态机库，不用watchdog
+   · 最终保存修复后的文件
+5. 两个简单bug示例
+   · 函数返回值写错、变量未定义
+   · 确保脚本能至少修复其中一个
+
+P1 任务（要做，但可用最小版本）
+
+6. 基础日志
+   · 用 print 打印每步：调用LLM前的prompt、返回的tool_calls、测试输出
+
+P2 任务（可最后补）
+
+7. 记录token消耗
+   · 用 tiktoken 粗略统计输入/输出token数
+
+第1周末产出：能对单文件bug自动修复的脚本（.py），命令行运行可见成功/失败。
+
+---
+
+第2周：AST上下文压缩 + 完整FSM骨架
+
+目标：支持多文件项目，用骨架树降低上下文，并用状态机库重构流程。
+
+P0 任务
+
+1. 构建SkeletonTree类
+   · 递归遍历目录，对所有 .py 文件提取：文件名、顶层函数名（及行号范围）、类名及其方法名
+   · 输出为文本格式（例如 file.py: def foo (10-25), class Bar (30-80)）
+   · 提供 expand_function(file_path, func_name) 返回完整函数源码
+2. 修改Agent主流程：先送骨架
+   · System prompt明确：先给整个项目的骨架文本，模型需要查看某函数细节时调用 expand_function
+   · 模型收到完整函数源码后再进行修复
+3. 引入简单LRU缓存
+   · 最多缓存5个展开的函数，避免重复读取文件（用 functools.lru_cache 或手写字典）
+4. 使用 transitions 库定义状态机
+   · 状态：INIT, LOCATE, PATCH, TEST, SUCCESS, FAIL
+   · 事件：load_skeleton, expand, edit, run_tests
+   · 编写每个状态的回调函数（如 on_enter_LOCATE 里调用LLM定位）
+5. 将第一周的直线逻辑迁移到状态机
+   · 替换原来的 if-else，确保状态流转正确
+
+P1 任务
+
+6. 用一个小型多文件项目测试
+   · 例如3个文件，其中一个文件引用另一个文件的函数，故意引入bug
+   · 对比使用骨架前后的prompt token数（用 tiktoken 测量），目标减少50%以上
+
+P2 任务
+
+7. 支持类内方法的展开
+   · 如果时间不够，可以先把类当作普通函数处理，暂不支持方法级别的精确展开
+
+第2周末产出：能处理多文件项目、状态机驱动的Agent，且可展示token减少效果。
+
+---
+
+第3周：防死循环 + Docker沙盒加固 + 约束解码初版
+
+目标：解决Agent重复调用相同工具、无限循环的问题，增强输出可靠性。
+
+P0 任务
+
+1. Watchdog计数器
+   · 在FSM中记录每个状态进入的次数
+   · 如果在同一状态连续触发同一工具超过3次（例如 LOCATE 状态连续调用 search_skeleton 3次），强制回退到上一个Checkpoint（例如回到INIT或LOCATE的初始）
+2. Checkpoint机制
+   · 每次进入 PATCH 状态前，备份当前代码快照（保存整个文件内容）
+   · 回退时恢复快照
+3. 指数退避重试
+   · 当模型返回的工具调用无法解析（JSON非法或参数缺失）时，等待 2^retry 秒后重试（最多3次）
+4. Docker安全配置
+   · 禁止网络：network_disabled=True
+   · 限制内存：mem_limit='1g'
+   · 只读根文件系统：read_only=True（但代码目录需要可写，可单独挂载可写卷）
+   · 禁止特权模式：privileged=False
+5. 约束解码：强制JSON输出
+   · 使用 outlines 库（推荐）或 jsonformer，强制模型输出符合指定Schema的JSON
+   · 若不合法，立刻拒绝并让LLM重试（附带错误信息）
+6. 所有工具的Pydantic Schema
+   · 定义 SearchFunctionArgs, ExpandFunctionArgs, EditFunctionArgs 等
+   · 在解析模型输出后立即校验，类型错误则重试
+
+P1 任务
+
+7. 危险命令黑名单（简单版）
+   · 在Docker执行命令前，检查是否包含 rm -rf /、sudo、chmod 777 等，直接拒绝
+8. 集成测试：故意破坏模型输出
+   · 模拟模型返回 {"tool": "search_function", "arguments": "not json"}，验证系统不会崩溃
+
+P2 任务
+
+9. 结构化日志
+   · 用 structlog 或 logging 输出JSON格式日志，方便后续分析
+
+第3周末产出：具备防死循环、安全沙盒、强输出校验的稳定Agent，不会因为模型异常而卡死。
+
+---
+
+第4周：评估 + 文档 + 简历材料
+
+目标：在真实评测集上跑出数据，制作可展示的成果。
+
+P0 任务
+
+1. 下载SWE-bench-lite并准备子集
+   · 选取其中Python相关的5-10个实例（手动筛选，避免依赖过多）
+   · 每个实例包含：bug描述、原始代码仓库（可简化为单文件或多文件的小项目）、测试命令
+2. 批量运行Agent并记录结果
+   · 对每个实例运行一次，记录：成功/失败、状态转换次数、总token消耗、耗时
+   · 输出一个简单的JSON结果文件
+3. 失败分类与分析
+   · 写一个脚本统计失败原因：定位错误、修复错误、超时、死循环（被watchdog终止）
+   · 挑选1-2个典型失败case做根因分析（写在博客/README里）
+4. GitHub README
+   · 项目名称、一句话介绍
+   · 架构图（可以用Mermaid画，或用文本描述）
+   · 快速开始（如何安装依赖、配置DeepSeek API key、运行示例）
+   · 评估结果（表格或列表形式，因为你不喜欢表格，可用列表）
+   · 技术难点：AST压缩、防死循环、约束解码、成本分析
+5. 更新简历
+   · 将PDF中的指标替换为自己的实测数据
+   · 例如：“在SWE-bench-lite子集（5个Python任务）上修复成功3个，平均上下文token减少74%，单次修复成本约￥0.02”
+
+P1 任务
+
+6. 写技术博客（3000字左右）
+   · 可发在知乎/掘金/个人博客
+   · 内容包括：背景、整体架构、关键实现（附代码片段）、踩坑记录、成本对比（DeepSeek vs GPT-4o）
+7. 制作演示视频/gif
+   · 录屏展示Agent自动修复一个真实bug的过程（从读取issue到测试通过）
+   · 长度1分钟以内，推荐用LICEcap或OBS
+
+P2 任务
+
+8. 针对失败case做一次改进
+   · 例如修改prompt、增加一个预检查工具（如check_syntax），然后重新跑失败的实例，记录提升效果
+
+第4周末产出：完整的GitHub仓库、可复现的评估结果、简历亮点段落、技术博客草稿。
+
+---
+
+总体时间分配（4周，按每天4-6小时计）
+
+· 第1周：约25-30小时
+· 第2周：约30-35小时
+· 第3周：约30-35小时
+· 第4周：约25-30小时（包含文档）
