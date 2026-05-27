@@ -2,7 +2,10 @@ import os
 import json
 from typing import Any, Optional
 from dataclasses import dataclass, field
+from dotenv import load_dotenv
 from openai import OpenAI
+
+load_dotenv()
 
 
 @dataclass
@@ -16,7 +19,7 @@ class LLMResponse:
 class LLMClient:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro[1m]"
 
     def __post_init__(self):
         if not self.api_key:
@@ -35,6 +38,8 @@ class LLMClient:
         tools: Optional[list[dict[str, Any]]] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        thinking: bool = False,
+        reasoning_effort: str = "high",
     ) -> LLMResponse:
         """调用 LLM 进行对话。
 
@@ -43,6 +48,8 @@ class LLMClient:
             tools: 工具定义列表（Function Calling 格式）
             temperature: 温度参数
             max_tokens: 最大输出 token 数
+            thinking: 是否启用深度思考模式
+            reasoning_effort: 推理强度（low/medium/high）
 
         Returns:
             LLMResponse 包含 content、tool_calls、usage
@@ -53,6 +60,12 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        if thinking:
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": reasoning_effort,
+            }
 
         if tools:
             kwargs["tools"] = tools
