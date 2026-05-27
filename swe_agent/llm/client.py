@@ -13,13 +13,14 @@ class LLMResponse:
     content: Optional[str]
     tool_calls: list[dict[str, Any]]
     usage: dict[str, int]
+    reasoning_content: Optional[str] = None
 
 
 @dataclass
 class LLMClient:
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-pro[1m]"
+    model: str = "deepseek-v4-pro"
 
     def __post_init__(self):
         if not self.api_key:
@@ -80,6 +81,7 @@ class LLMClient:
             for tc in message.tool_calls:
                 tool_calls.append({
                     "id": tc.id,
+                    "type": "function",
                     "function": {
                         "name": tc.function.name,
                         "arguments": tc.function.arguments,
@@ -94,10 +96,14 @@ class LLMClient:
                 "total_tokens": response.usage.total_tokens,
             }
 
+        # DeepSeek thinking 模式返回 reasoning_content，需要传回
+        reasoning_content = getattr(message, "reasoning_content", None)
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
 
     def chat_with_tools(
@@ -129,6 +135,8 @@ class LLMClient:
             assistant_msg: dict[str, Any] = {"role": "assistant"}
             if response.content:
                 assistant_msg["content"] = response.content
+            if response.reasoning_content:
+                assistant_msg["reasoning_content"] = response.reasoning_content
             assistant_msg["tool_calls"] = response.tool_calls
             conversation.append(assistant_msg)
 

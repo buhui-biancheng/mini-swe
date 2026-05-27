@@ -14,9 +14,11 @@ from swe_agent.sandbox.docker_runner import run_in_docker
 class ToolRegistry:
     """工具注册与调度中心。"""
 
-    def __init__(self, skeleton_text: str = "", code_dir: str = "."):
+    def __init__(self, skeleton_text: str = "", code_dir: str = ".", python_version: str = "3.11", packages: list[str] | None = None):
         self.skeleton_text = skeleton_text
         self.code_dir = code_dir
+        self.python_version = python_version
+        self.packages = packages or ["pytest"]
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
             "expand_function": self._expand_function,
@@ -61,7 +63,12 @@ class ToolRegistry:
         return {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}"}
 
     def _run_test(self, command: str) -> dict:
-        result = run_in_docker(self.code_dir, command)
+        result = run_in_docker(
+            self.code_dir,
+            command,
+            python_version=self.python_version,
+            packages=self.packages,
+        )
         return {
             "stdout": result.stdout,
             "stderr": result.stderr,
