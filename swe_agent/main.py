@@ -1,3 +1,5 @@
+"""SWE-Agent 主入口：支持直线流程和 FSM 状态机两种模式。"""
+
 import os
 import sys
 import json
@@ -6,10 +8,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from swe_agent.llm.client import LLMClient
-from swe_agent.ast_view.function_map import get_function_line_map
+from swe_agent.ast_view.skeleton import SkeletonTree
 from swe_agent.tools.registry import ToolRegistry
 from swe_agent.tools.schemas import TOOLS
 from swe_agent.sandbox.docker_runner import run_in_docker
+from swe_agent.utils.token_counter import analyze_project_tokens
 
 
 SYSTEM_PROMPT = """\
@@ -30,6 +33,8 @@ SYSTEM_PROMPT = """\
 
 
 def build_skeleton(filepath: str) -> str:
+    """构建单文件骨架（兼容旧接口）。"""
+    from swe_agent.ast_view.function_map import get_function_line_map
     line_map = get_function_line_map(filepath)
     parts = []
     for name, (start, end) in line_map.items():
@@ -37,14 +42,14 @@ def build_skeleton(filepath: str) -> str:
     return f"{filepath}: {', '.join(parts)}"
 
 
-def run_agent(
+def run_agent_linear(
     bug_file: str,
     test_command: str,
     max_retries: int = 2,
     python_version: str = "3.11",
     packages: list[str] | None = None,
 ) -> bool:
-    """运行 Agent 修复 bug。
+    """直线流程 Agent（兼容旧接口）。
 
     Args:
         bug_file: 有 bug 的 Python 文件路径
@@ -127,26 +132,118 @@ def run_agent(
     return False
 
 
+def run_agent_fsm(
+    bug_file: str,
+    test_command: str,
+    max_retries: int = 2,
+    python_version: str = "3.11",
+    packages: list[str] | None = None,
+) -> bool:
+    """FSM 状态机 Agent（新增）。
+
+    Args:
+        bug_file: 有 bug 的 Python 文件路径
+        test_command: 测试命令
+        max_retries: 最大重试次数
+        python_version: Docker 容器的 Python 版本
+        packages: 需要预装的包列表
+
+    Returns:
+        True 表示修复成功，False 表示失败
+    """
+    from swe_agent.fsm.agent_fsm import AgentFSM
+
+    fsm = AgentFSM(
+        bug_file=bug_file,
+        test_command=test_command,
+        max_retries=max_retries,
+        python_version=python_version,
+        packages=packages,
+    )
+    return fsm.run()
+
+
+def run_agent(
+    bug_file: str,
+    test_command: str,
+    max_retries: int = 2,
+    python_version: str = "3.11",
+    packages: list[str] | None = None,
+    use_fsm: bool = False,
+) -> bool:
+    """运行 Agent 修复 bug（统一入口）。
+
+    Args:
+        bug_file: 有 bug 的 Python 文件路径
+        test_command: 测试命令
+        max_retries: 最大重试次数
+        python_version: Docker 容器的 Python 版本
+        packages: 需要预装的包列表
+        use_fsm: 是否使用 FSM 状态机模式
+
+    Returns:
+        True 表示修复成功，False 表示失败
+    """
+    if use_fsm:
+        return run_agent_fsm(bug_file, test_command, max_retries, python_version, packages)
+    else:
+        return run_agent_linear(bug_file, test_command, max_retries, python_version, packages)
+
+
+def analyze_tokens(project_dir: str) -> None:
+    """分析项目 token 统计。"""
+    print(f"\n{'='*50}")
+    print(f"[TOKEN] 分析项目: {project_dir}")
+    print(f"{'='*50}")
+
+    result = analyze_project_tokens(project_dir)
+
+    print(f"\n文件数量: {result['file_count']}")
+    print(f"函数数量: {result['total_functions']}")
+    print(f"完整源码 tokens: {result['full_tokens']}")
+    print(f"骨架 tokens: {result['skeleton_tokens']}")
+    print(f"压缩率: {result['reduction_percent']}%")
+
+    print(f"\n文件详情:")
+    for f in result['files']:
+        print(f"  - {f['file']}: {f['tokens']} tokens, {f['functions']} 个函数")
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="SWE-Agent 自动代码修复")
-    parser.add_argument("bug_file", help="有 bug 的 Python 文件路径")
-    parser.add_argument("test_command", help="测试命令")
-    parser.add_argument("--python", default="3.11", help="Docker 容器 Python 版本 (默认: 3.11)")
-    parser.add_argument("--packages", nargs="+", default=["pytest"], help="预装的包 (默认: pytest)")
-    parser.add_argument("--max-retries", type=int, default=2, help="最大重试次数 (默认: 2)")
+    subparsers = parser.add_subparsers(dest="command", help="可用命令")
+
+    # fix 命令
+    fix_parser = subparsers.add_parser("fix", help="修复 bug")
+    fix_parser.add_argument("bug_file", help="有 bug 的 Python 文件路径")
+    fix_parser.add_argument("test_command", help="测试命令")
+    fix_parser.add_argument("--python", default="3.11", help="Docker 容器 Python 版本 (默认: 3.11)")
+    fix_parser.add_argument("--packages", nargs="+", default=["pytest"], help="预装的包 (默认: pytest)")
+    fix_parser.add_argument("--max-retries", type=int, default=2, help="最大重试次数 (默认: 2)")
+    fix_parser.add_argument("--fsm", action="store_true", help="使用 FSM 状态机模式")
+
+    # analyze 命令
+    analyze_parser = subparsers.add_parser("analyze", help="分析项目 token 统计")
+    analyze_parser.add_argument("project_dir", help="项目目录")
 
     args = parser.parse_args()
 
-    success = run_agent(
-        args.bug_file,
-        args.test_command,
-        max_retries=args.max_retries,
-        python_version=args.python,
-        packages=args.packages,
-    )
-    sys.exit(0 if success else 1)
+    if args.command == "fix":
+        success = run_agent(
+            args.bug_file,
+            args.test_command,
+            max_retries=args.max_retries,
+            python_version=args.python,
+            packages=args.packages,
+            use_fsm=args.fsm,
+        )
+        sys.exit(0 if success else 1)
+    elif args.command == "analyze":
+        analyze_tokens(args.project_dir)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
