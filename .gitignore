@@ -120,5 +120,6 @@ dmypy.json
 # Local rules (not uploaded)
 .local_rules/
 
-# 开发计划（本地文档，不上传）
+# 计划文件（本地文档，不上传）
+计划.txt
 开发计划.md
