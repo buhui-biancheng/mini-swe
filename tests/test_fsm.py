@@ -44,17 +44,23 @@ class TestWatchdog:
 
     def test_record_state_normal(self):
         """测试正常状态记录。"""
-        w = Watchdog()
+        w = Watchdog(max_same_state=3)
         assert w.record_state("locate") is False
         assert w.record_state("locate") is False
         assert w.record_state("locate") is True  # 第 3 次触发
 
     def test_record_tool_normal(self):
         """测试正常工具记录。"""
-        w = Watchdog()
+        w = Watchdog(max_same_tool=3)
         assert w.record_tool("search_function") is False
         assert w.record_tool("search_function") is False
         assert w.record_tool("search_function") is True  # 第 3 次触发
+
+    def test_default_limits(self):
+        """测试默认限制值。"""
+        w = Watchdog()
+        assert w.max_same_state == 10
+        assert w.max_same_tool == 8
 
     def test_reset_state(self):
         """测试重置状态计数。"""
@@ -173,7 +179,8 @@ class TestAgentFSM:
         )
 
         assert fsm.watchdog is not None
-        assert fsm.watchdog.max_same_state == 3
+        assert fsm.watchdog.max_same_state == 10
+        assert fsm.watchdog.max_same_tool == 8
 
     def test_checkpoint_initialized(self, sample_bug_project):
         """测试 Checkpoint 已初始化。"""

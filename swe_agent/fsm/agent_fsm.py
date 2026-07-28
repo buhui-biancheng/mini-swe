@@ -67,8 +67,8 @@ class Watchdog:
     """
     state_counts: dict[str, int] = field(default_factory=dict)
     tool_counts: dict[str, int] = field(default_factory=dict)
-    max_same_state: int = 3
-    max_same_tool: int = 3
+    max_same_state: int = 10
+    max_same_tool: int = 8
 
     def record_state(self, state: str) -> bool:
         """记录状态进入，返回 True 表示触发防死循环。"""
