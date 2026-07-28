@@ -40,51 +40,72 @@ def test_add():
 
 
 class TestWatchdog:
-    """Watchdog 测试类。"""
-
-    def test_record_state_normal(self):
-        """测试正常状态记录。"""
-        w = Watchdog(max_same_state=3)
-        assert w.record_state("locate") is False
-        assert w.record_state("locate") is False
-        assert w.record_state("locate") is True  # 第 3 次触发
+    """Watchdog 测试类（基于 DecisionEngine）。"""
 
     def test_record_tool_normal(self):
         """测试正常工具记录。"""
-        w = Watchdog(max_same_tool=3)
-        assert w.record_tool("search_function") is False
-        assert w.record_tool("search_function") is False
-        assert w.record_tool("search_function") is True  # 第 3 次触发
-
-    def test_default_limits(self):
-        """测试默认限制值。"""
         w = Watchdog()
-        assert w.max_same_state == 10
-        assert w.max_same_tool == 8
+        # 相同工具+相同参数连续 3 次才触发
+        assert w.record_tool("search_function", {"name": "add"}) is False
+        assert w.record_tool("search_function", {"name": "add"}) is False
+        assert w.record_tool("search_function", {"name": "add"}) is True  # 连续 3 次相同
 
-    def test_reset_state(self):
-        """测试重置状态计数。"""
+    def test_record_tool_different_args(self):
+        """测试不同参数不触发。"""
         w = Watchdog()
-        w.record_state("locate")
-        w.record_state("locate")
-        w.reset_state("locate")
-        assert w.record_state("locate") is False  # 重置后重新计数
+        assert w.record_tool("search_function", {"name": "add"}) is False
+        assert w.record_tool("search_function", {"name": "mul"}) is False
+        assert w.record_tool("search_function", {"name": "div"}) is False
+        assert w.record_tool("search_function", {"name": "sub"}) is False
+        assert w.record_tool("search_function", {"name": "pow"}) is False
 
-    def test_reset_tool(self):
-        """测试重置工具计数。"""
+    def test_record_state_normal(self):
+        """测试正常状态记录。"""
         w = Watchdog()
-        w.record_tool("search_function")
-        w.reset_tool("search_function")
-        assert w.record_tool("search_function") is False  # 重置后重新计数
+        # 连续 5 次进入同一状态才触发
+        for _ in range(4):
+            assert w.record_state("locate") is False
+        assert w.record_state("locate") is True
+
+    def test_record_state_different(self):
+        """测试不同状态不触发。"""
+        w = Watchdog()
+        for s in ["locate", "patch", "test", "locate", "patch"]:
+            assert w.record_state(s) is False
+
+    def test_record_edit(self):
+        """测试编辑记录。"""
+        w = Watchdog()
+        w.record_edit("/tmp/test.py", True)
+        w.record_edit("/tmp/test.py", True)
+        assert w.engine.successful_edits == 2
+        assert w.engine.edit_count == 2
+
+    def test_check_stuck(self):
+        """测试卡住检测。"""
+        w = Watchdog()
+        # 连续 6 轮没有编辑
+        for _ in range(6):
+            w.record_edit("/tmp/test.py", False)
+        stuck, reason = w.check_stuck()
+        assert stuck is True
+        assert reason == "no_edit_rounds"
+
+    def test_check_not_stuck(self):
+        """测试正常情况不触发。"""
+        w = Watchdog()
+        w.record_edit("/tmp/test.py", True)
+        stuck, _ = w.check_stuck()
+        assert stuck is False
 
     def test_reset_all(self):
         """测试重置所有计数。"""
         w = Watchdog()
         w.record_state("locate")
-        w.record_tool("search_function")
+        w.record_tool("search_function", {"name": "add"})
         w.reset_all()
-        assert w.state_counts == {}
-        assert w.tool_counts == {}
+        stuck, _ = w.check_stuck()
+        assert stuck is False
 
 
 class TestCheckpoint:
@@ -179,8 +200,7 @@ class TestAgentFSM:
         )
 
         assert fsm.watchdog is not None
-        assert fsm.watchdog.max_same_state == 10
-        assert fsm.watchdog.max_same_tool == 8
+        assert fsm.watchdog.engine is not None
 
     def test_checkpoint_initialized(self, sample_bug_project):
         """测试 Checkpoint 已初始化。"""

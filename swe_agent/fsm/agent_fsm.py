@@ -8,7 +8,7 @@
 功能：
 1. 6 个状态：INIT, LOCATE, PATCH, TEST, SUCCESS, FAIL
 2. 每个状态的 on_enter 回调触发 LLM 调用
-3. Watchdog 防死循环（同状态同工具 ≥ 3 次触发回退）
+3. Watchdog 防死循环（基于 DecisionEngine 的智能检测）
 4. Checkpoint 机制（PATCH 前备份代码快照）
 """
 
@@ -23,6 +23,7 @@ from swe_agent.llm.client import LLMClient
 from swe_agent.ast_view.skeleton import SkeletonTree
 from swe_agent.tools.registry import ToolRegistry
 from swe_agent.tools.schemas import TOOLS
+from swe_agent.watchdog import DecisionEngine, WatchdogConfig, Action
 
 
 # 状态定义
@@ -61,41 +62,35 @@ SYSTEM_PROMPT = """\
 
 @dataclass
 class Watchdog:
-    """Watchdog: 防死循环机制。
+    """Watchdog: 基于 DecisionEngine 的智能防死循环机制。
 
-    记录每个状态的进入次数，同状态同工具 ≥ 3 次触发回退。
+    使用纯决策引擎进行检测：
+    1. 重复调用检测（最近 3 次相同工具+参数）
+    2. 状态进入检测（最近 5 次进入同一状态）
+    3. 无进展检测（连续多轮没有编辑）
+    4. 低效编辑检测（编辑成功率过低）
     """
-    state_counts: dict[str, int] = field(default_factory=dict)
-    tool_counts: dict[str, int] = field(default_factory=dict)
-    max_same_state: int = 10
-    max_same_tool: int = 8
+    engine: DecisionEngine = field(default_factory=lambda: DecisionEngine(WatchdogConfig()))
+
+    def record_tool(self, tool_name: str, arguments: dict) -> bool:
+        """记录工具调用，返回 True 表示触发防死循环。"""
+        return self.engine.record_tool_call(tool_name, arguments)
 
     def record_state(self, state: str) -> bool:
         """记录状态进入，返回 True 表示触发防死循环。"""
-        self.state_counts[state] = self.state_counts.get(state, 0) + 1
-        if self.state_counts[state] >= self.max_same_state:
-            return True
-        return False
+        return self.engine.record_state_entry(state)
 
-    def record_tool(self, tool_name: str) -> bool:
-        """记录工具调用，返回 True 表示触发防死循环。"""
-        self.tool_counts[tool_name] = self.tool_counts.get(tool_name, 0) + 1
-        if self.tool_counts[tool_name] >= self.max_same_tool:
-            return True
-        return False
+    def record_edit(self, file_path: str, success: bool) -> None:
+        """记录编辑操作。"""
+        self.engine.record_edit(file_path, success)
 
-    def reset_state(self, state: str) -> None:
-        """重置指定状态的计数。"""
-        self.state_counts[state] = 0
-
-    def reset_tool(self, tool_name: str) -> None:
-        """重置指定工具的计数。"""
-        self.tool_counts[tool_name] = 0
+    def check_stuck(self) -> tuple[bool, str]:
+        """检查是否卡住了。"""
+        return self.engine.check_stuck()
 
     def reset_all(self) -> None:
         """重置所有计数。"""
-        self.state_counts.clear()
-        self.tool_counts.clear()
+        self.engine.reset()
 
 
 @dataclass
@@ -250,13 +245,25 @@ class AgentFSM:
         def tool_executor(tool_name: str, arguments: dict) -> str:
             print(f"  [TOOL] 调用 {tool_name}({json.dumps(arguments, ensure_ascii=False)})")
             result = self.registry.execute(tool_name, arguments)
-
-            # Watchdog 检查工具调用
-            if self.watchdog.record_tool(tool_name):
-                print(f"  [WATCHDOG] 工具 {tool_name} 调用过多")
-                return json.dumps({"error": f"工具 {tool_name} 调用次数超限"})
-
             result_data = json.loads(result)
+
+            # Watchdog 检查工具调用（传入参数做重复检测）
+            if self.watchdog.record_tool(tool_name, arguments):
+                print(f"  [WATCHDOG] 检测到重复调用: {tool_name}")
+                return json.dumps({"error": f"检测到重复调用: {tool_name}"})
+
+            # 追踪 edit 操作
+            if tool_name == "edit_function":
+                is_success = "error" not in result_data
+                file_path = arguments.get("file_path", "")
+                self.watchdog.record_edit(file_path, is_success)
+
+            # 追踪无进展
+            stuck, reason = self.watchdog.check_stuck()
+            if stuck:
+                print(f"  [WATCHDOG] 检测到卡住: {reason}")
+                return json.dumps({"error": f"检测到卡住: {reason}"})
+
             if "error" in result_data:
                 print(f"  [TOOL] 错误: {result_data['error']}")
             else:
