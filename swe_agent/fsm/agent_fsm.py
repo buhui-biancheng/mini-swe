@@ -55,7 +55,8 @@ SYSTEM_PROMPT = """\
 - 每次只修复一个 bug
 - edit_function 的 start_line 和 end_line 必须精确对应要替换的代码行
 - 新代码必须是完整的、可运行的 Python 代码
-- 修复后必须运行测试验证"""
+- 修复后必须运行测试验证
+- 文件路径使用骨架中显示的相对路径即可，系统会自动处理路径转换"""
 
 
 @dataclass
@@ -209,6 +210,12 @@ class AgentFSM:
         print(f"[INIT] 测试命令: {self.test_command}")
         print(f"{'='*50}\n")
 
+        # 将测试命令中的绝对路径转换为相对路径
+        display_command = self.test_command
+        if self.code_dir in display_command:
+            display_command = display_command.replace(self.code_dir + "/", "")
+            display_command = display_command.replace(self.code_dir, "")
+
         self.messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -217,7 +224,7 @@ class AgentFSM:
                     f"请修复以下文件中的 bug：\n\n"
                     f"文件：{self.bug_file}\n\n"
                     f"骨架：\n{self.skeleton_text}\n\n"
-                    f"修复完成后运行测试：{self.test_command}"
+                    f"修复完成后运行测试：{display_command}"
                 ),
             },
         ]
@@ -291,10 +298,19 @@ class AgentFSM:
             self.max_retries()
             return
 
-        print(f"\n[TEST] 运行测试: {self.test_command}")
+        # 将测试命令转换为容器内路径
+        import re
+        container_command = self.test_command
+        if self.code_dir in container_command:
+            container_command = container_command.replace(self.code_dir, "/workspace")
+        # 去掉目录前缀
+        container_command = re.sub(r'(?:^|\s)(?:examples|tests|eval)/', ' ', container_command)
+        container_command = ' '.join(container_command.split())
+
+        print(f"\n[TEST] 运行测试: {container_command}")
 
         from swe_agent.sandbox.docker_runner import run_in_docker
-        test_result = run_in_docker(self.code_dir, self.test_command)
+        test_result = run_in_docker(self.code_dir, container_command)
 
         print(f"[TEST] exit_code: {test_result.exit_code}")
         if test_result.stdout:

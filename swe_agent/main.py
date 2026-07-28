@@ -29,7 +29,8 @@ SYSTEM_PROMPT = """\
 - 每次只修复一个 bug
 - edit_function 的 start_line 和 end_line 必须精确对应要替换的代码行
 - 新代码必须是完整的、可运行的 Python 代码
-- 修复后必须运行测试验证"""
+- 修复后必须运行测试验证
+- 文件路径使用骨架中显示的相对路径即可，系统会自动处理路径转换"""
 
 
 def build_skeleton(filepath: str) -> str:
@@ -90,12 +91,18 @@ def run_agent_linear(
 
     client = LLMClient()
 
+    # 将测试命令中的绝对路径转换为相对路径（用于显示和 Docker）
+    display_command = test_command
+    if code_dir in display_command:
+        display_command = display_command.replace(code_dir + "/", "")
+        display_command = display_command.replace(code_dir, "")
+
     for attempt in range(max_retries + 1):
         print(f"\n--- 第 {attempt + 1} 次尝试 ---")
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"请修复以下文件中的 bug：\n\n文件：{bug_file}\n\n骨架：\n{skeleton}\n\n修复完成后运行测试：{test_command}"},
+            {"role": "user", "content": f"请修复以下文件中的 bug：\n\n文件：{bug_file}\n\n骨架：\n{skeleton}\n\n修复完成后运行测试：{display_command}"},
         ]
 
         print("[LLM] 发送请求到 DeepSeek...")
@@ -109,8 +116,8 @@ def run_agent_linear(
         if final_response:
             print(f"\n[LLM] 回复: {final_response[:200]}")
 
-        print(f"\n[TEST] 运行测试: {test_command}")
-        test_result = run_in_docker(code_dir, test_command)
+        print(f"\n[TEST] 运行测试: {display_command}")
+        test_result = run_in_docker(code_dir, display_command)
         print(f"[TEST] exit_code: {test_result.exit_code}")
         if test_result.stdout:
             print(f"[TEST] stdout: {test_result.stdout[:500]}")
