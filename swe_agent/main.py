@@ -235,6 +235,9 @@ def main():
     analyze_parser = subparsers.add_parser("analyze", help="分析项目 token 统计")
     analyze_parser.add_argument("project_dir", help="项目目录")
 
+    # tui 命令
+    tui_parser = subparsers.add_parser("tui", help="启动 TUI 终端界面")
+
     args = parser.parse_args()
 
     if args.command == "fix":
@@ -249,6 +252,9 @@ def main():
         sys.exit(0 if success else 1)
     elif args.command == "analyze":
         analyze_tokens(args.project_dir)
+    elif args.command == "tui":
+        from swe_agent.tui.app import run_tui
+        run_tui()
     else:
         parser.print_help()
 

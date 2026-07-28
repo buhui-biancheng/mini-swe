@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -42,6 +42,8 @@ class LLMClient:
         max_tokens: int = 4096,
         thinking: bool = False,
         reasoning_effort: str = "high",
+        stream: bool = False,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """调用 LLM 进行对话。
 
@@ -52,6 +54,8 @@ class LLMClient:
             max_tokens: 最大输出 token 数
             thinking: 是否启用深度思考模式
             reasoning_effort: 推理强度（low/medium/high）
+            stream: 是否启用流式输出
+            on_token: 流式输出回调函数
 
         Returns:
             LLMResponse 包含 content、tool_calls、usage
@@ -61,16 +65,22 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": stream,
         }
 
         if thinking:
             kwargs["extra_body"] = {
                 "thinking": {"type": "enabled"},
-                "reasoning_effort": reasoning_effort,
             }
+            # reasoning_effort 是顶层参数
+            kwargs["reasoning_effort"] = reasoning_effort
 
         if tools:
             kwargs["tools"] = tools
+
+        # 流式输出处理
+        if stream:
+            return self._handle_stream(kwargs, on_token)
 
         response = self.client.chat.completions.create(**kwargs)
 
@@ -105,6 +115,71 @@ class LLMClient:
             tool_calls=tool_calls,
             usage=usage,
             reasoning_content=reasoning_content,
+        )
+
+    def _handle_stream(
+        self,
+        kwargs: dict[str, Any],
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> LLMResponse:
+        """处理流式输出。"""
+        content = ""
+        tool_calls_data = []
+        usage = {}
+        reasoning_content = ""
+
+        response = self.client.chat.completions.create(**kwargs)
+
+        for chunk in response:
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # 处理内容
+            if delta.content:
+                content += delta.content
+                if on_token:
+                    on_token(delta.content)
+
+            # 处理 reasoning_content（思考链）
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_content += delta.reasoning_content
+                if on_token:
+                    on_token(delta.reasoning_content)
+
+            # 处理工具调用
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    while len(tool_calls_data) <= idx:
+                        tool_calls_data.append({
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                    if tc_delta.id:
+                        tool_calls_data[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tool_calls_data[idx]["function"]["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tool_calls_data[idx]["function"]["arguments"] += tc_delta.function.arguments
+
+            # 处理 usage
+            if chunk.usage:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                }
+
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls_data,
+            usage=usage,
+            reasoning_content=reasoning_content if reasoning_content else None,
         )
 
     def chat_with_tools(

@@ -26,6 +26,7 @@ class ToolRegistry:
             "expand_function": self._expand_function,
             "edit_function": self._edit_function,
             "run_test": self._run_test,
+            "run_command": self._run_command,
         }
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -127,3 +128,35 @@ class ToolRegistry:
             "stderr": result.stderr,
             "exit_code": result.exit_code,
         }
+
+    def _run_command(self, command: str) -> dict:
+        """在宿主机上运行终端命令。"""
+        import subprocess
+
+        try:
+            # 安全检查：禁止危险命令
+            dangerous = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if="]
+            for d in dangerous:
+                if d in command.lower():
+                    return {"error": f"危险命令被禁止: {command}"}
+
+            # 执行命令
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=self.code_dir,
+            )
+
+            return {
+                "stdout": result.stdout[:2000] if result.stdout else "",
+                "stderr": result.stderr[:500] if result.stderr else "",
+                "exit_code": result.returncode,
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"error": f"命令执行超时: {command}"}
+        except Exception as e:
+            return {"error": f"命令执行失败: {e}"}

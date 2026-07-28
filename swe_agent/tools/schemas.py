@@ -26,12 +26,18 @@ class RunTestArgs(BaseModel):
     command: str = Field(description="要执行的测试命令，如 'pytest test.py'")
 
 
+class RunCommandArgs(BaseModel):
+    """在宿主机上运行终端命令。"""
+    command: str = Field(description="要执行的终端命令，如 'ls -la'")
+
+
 # 工具名称到 Schema 的映射
 TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
     "expand_function": ExpandFunctionArgs,
     "edit_function": EditFunctionArgs,
     "run_test": RunTestArgs,
+    "run_command": RunCommandArgs,
 }
 
 
@@ -89,6 +95,14 @@ TOOLS = [
             "name": "run_test",
             "description": "在 Docker 沙盒中运行测试命令，返回 stdout/stderr/exit_code",
             "parameters": RunTestArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "在宿主机上运行终端命令（如 ls, cat, pwd），返回 stdout/stderr/exit_code",
+            "parameters": RunCommandArgs.model_json_schema(),
         },
     },
 ]
