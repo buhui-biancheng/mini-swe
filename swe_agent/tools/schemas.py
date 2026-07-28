@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from typing import Any, Optional
 
 
 class SearchFunctionArgs(BaseModel):
@@ -23,6 +24,37 @@ class EditFunctionArgs(BaseModel):
 class RunTestArgs(BaseModel):
     """在沙盒中运行测试命令。"""
     command: str = Field(description="要执行的测试命令，如 'pytest test.py'")
+
+
+# 工具名称到 Schema 的映射
+TOOL_SCHEMAS = {
+    "search_function": SearchFunctionArgs,
+    "expand_function": ExpandFunctionArgs,
+    "edit_function": EditFunctionArgs,
+    "run_test": RunTestArgs,
+}
+
+
+def validate_tool_args(tool_name: str, args: dict[str, Any]) -> tuple[bool, Optional[str], Optional[dict[str, Any]]]:
+    """校验工具参数。
+
+    Args:
+        tool_name: 工具名称
+        args: 工具参数
+
+    Returns:
+        (是否成功, 错误信息, 校验后的参数)
+    """
+    schema_class = TOOL_SCHEMAS.get(tool_name)
+    if not schema_class:
+        return False, f"未知工具: {tool_name}", None
+
+    try:
+        validated = schema_class(**args)
+        return True, None, validated.model_dump()
+    except ValidationError as e:
+        error_msg = f"参数校验失败: {e.errors()[0]['msg']}"
+        return False, error_msg, None
 
 
 # Function Calling 工具定义（OpenAI 格式）

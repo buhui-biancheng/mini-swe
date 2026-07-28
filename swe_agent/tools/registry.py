@@ -6,6 +6,7 @@ from swe_agent.tools.schemas import (
     ExpandFunctionArgs,
     EditFunctionArgs,
     RunTestArgs,
+    validate_tool_args,
 )
 from swe_agent.ast_view.function_map import get_function_line_map, get_function_source
 from swe_agent.sandbox.docker_runner import run_in_docker
@@ -30,8 +31,13 @@ class ToolRegistry:
         if tool_name not in self._tools:
             return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)
 
+        # Pydantic Schema 校验
+        is_valid, error_msg, validated_args = validate_tool_args(tool_name, arguments)
+        if not is_valid:
+            return json.dumps({"error": error_msg}, ensure_ascii=False)
+
         try:
-            result = self._tools[tool_name](**arguments)
+            result = self._tools[tool_name](**validated_args)
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)

@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from typing import Any, Optional
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -112,6 +113,7 @@ class LLMClient:
         tools: list[dict[str, Any]],
         tool_executor: callable,
         max_rounds: int = 5,
+        max_retries: int = 3,
     ) -> tuple[str, list[dict[str, Any]]]:
         """带工具调用的多轮对话。
 
@@ -120,6 +122,7 @@ class LLMClient:
             tools: 工具定义列表
             tool_executor: 工具执行函数，接收 (tool_name, arguments) 返回结果字符串
             max_rounds: 最大工具调用轮数
+            max_retries: JSON 解析失败时最大重试次数
 
         Returns:
             (最终回复文本, 完整对话历史)
@@ -142,10 +145,33 @@ class LLMClient:
 
             for tc in response.tool_calls:
                 func_name = tc["function"]["name"]
-                try:
-                    args = json.loads(tc["function"]["arguments"])
-                except json.JSONDecodeError:
-                    args = {}
+
+                # 指数退避重试 JSON 解析
+                args = {}
+                json_parse_error = None
+                for retry in range(max_retries):
+                    try:
+                        args = json.loads(tc["function"]["arguments"])
+                        json_parse_error = None
+                        break
+                    except json.JSONDecodeError as e:
+                        json_parse_error = e
+                        if retry < max_retries - 1:
+                            wait_time = 2 ** retry  # 指数退避：1s, 2s, 4s
+                            print(f"  [RETRY] JSON 解析失败，{wait_time}秒后重试... ({retry + 1}/{max_retries})")
+                            time.sleep(wait_time)
+
+                if json_parse_error:
+                    print(f"  [ERROR] JSON 解析最终失败: {json_parse_error}")
+                    # 尝试从文本中提取 JSON
+                    raw = tc["function"]["arguments"]
+                    if "{" in raw and "}" in raw:
+                        try:
+                            start = raw.index("{")
+                            end = raw.rindex("}") + 1
+                            args = json.loads(raw[start:end])
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
 
                 result = tool_executor(func_name, args)
 
