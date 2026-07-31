@@ -1,7 +1,7 @@
 """TUI 数据模型。"""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 
 
@@ -9,9 +9,10 @@ from datetime import datetime
 class Message:
     """消息模型。"""
     content: str
-    msg_type: str  # user, assistant, tool_call, tool_result, thinking, system
+    msg_type: str  # user, assistant, tool_call, tool_result, thinking, system, diff, loading
     timestamp: datetime = field(default_factory=datetime.now)
     tool_name: Optional[str] = None
+    tool_args: Optional[dict[str, Any]] = None  # 工具调用参数
     is_error: bool = False
     is_collapsed: bool = False  # 思考链是否折叠
     duration: Optional[float] = None  # 工具调用耗时（秒）

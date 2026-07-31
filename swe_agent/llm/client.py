@@ -44,6 +44,7 @@ class LLMClient:
         reasoning_effort: str = "high",
         stream: bool = False,
         on_token: Optional[Callable[[str], None]] = None,
+        on_reasoning_token: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """调用 LLM 进行对话。
 
@@ -80,7 +81,7 @@ class LLMClient:
 
         # 流式输出处理
         if stream:
-            return self._handle_stream(kwargs, on_token)
+            return self._handle_stream(kwargs, on_token, on_reasoning_token)
 
         response = self.client.chat.completions.create(**kwargs)
 
@@ -121,6 +122,7 @@ class LLMClient:
         self,
         kwargs: dict[str, Any],
         on_token: Optional[Callable[[str], None]] = None,
+        on_reasoning_token: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
         """处理流式输出。"""
         content = ""
@@ -146,7 +148,9 @@ class LLMClient:
             # 处理 reasoning_content（思考链）
             if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 reasoning_content += delta.reasoning_content
-                if on_token:
+                if on_reasoning_token:
+                    on_reasoning_token(delta.reasoning_content)
+                elif on_token:
                     on_token(delta.reasoning_content)
 
             # 处理工具调用
