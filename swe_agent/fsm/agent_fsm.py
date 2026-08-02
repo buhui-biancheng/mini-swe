@@ -20,7 +20,7 @@ from typing import Any, Optional
 from transitions import Machine
 
 from swe_agent.llm.client import LLMClient
-from swe_agent.graph import GraphManager, AgentConfig
+from swe_agent.graph import GraphManager, AgentConfig, SyntaxFirewall
 from swe_agent.tools.registry import ToolRegistry
 from swe_agent.tools.schemas import TOOLS
 from swe_agent.utils.logger import AgentLogger
@@ -35,11 +35,12 @@ TRANSITIONS = [
     {"trigger": "start", "source": "init", "dest": "locate"},
     {"trigger": "locate_done", "source": "locate", "dest": "patch"},
     {"trigger": "patch_done", "source": "patch", "dest": "test"},
+    {"trigger": "patch_syntax_error", "source": "patch", "dest": "locate"},  # 语法防火墙驳回
     {"trigger": "test_pass", "source": "test", "dest": "success"},
     {"trigger": "test_fail", "source": "test", "dest": "locate"},
     {"trigger": "locate_fail", "source": "locate", "dest": "fail"},
     {"trigger": "patch_fail", "source": "patch", "dest": "fail"},
-    {"trigger": "max_retries", "source": "test", "dest": "fail"},
+    {"trigger": "retries_exhausted", "source": "test", "dest": "fail"},
 ]
 
 # 系统提示词
@@ -163,7 +164,7 @@ class AgentFSM:
         self.code_dir = os.path.dirname(self.bug_file)
         self.mode = mode if mode in ("dp", "greedy", "auto") else "auto"
 
-        # 核心组件（SkeletonTree → GraphIndex 迁移）
+        # 核心组件（图索引）
         self.agent_config = AgentConfig()
         self.client = LLMClient()
         self.logger = AgentLogger()
@@ -181,9 +182,11 @@ class AgentFSM:
             graph_index=self.graph_index,
         )
 
-        # 防死循环和快照
+        # 防死循环、快照、语法防火墙
         self.watchdog = Watchdog()
         self.checkpoint = Checkpoint()
+        self.syntax_firewall = SyntaxFirewall()
+        self._syntax_errors: list = []
 
         # 状态机
         self.machine = Machine(
@@ -205,6 +208,17 @@ class AgentFSM:
         self.messages: list[dict[str, Any]] = []
         self.attempt = 0
         self.tool_call_count = 0
+        self._prev_state: Optional[str] = None  # 记录上一状态，用于 transition 日志
+        self._edited_ranges: list[tuple] = []   # 记录本次编辑的 (file, start, end)
+
+    def _log_state_enter(self, state: str, attempt: int) -> None:
+        """记录状态进入 + 状态转换（transition 事件）。"""
+        self.logger.state_enter(state, attempt)
+        if self._prev_state is not None and self._prev_state != state:
+            self.logger.transition(
+                trigger="", source=self._prev_state, dest=state,
+            )
+        self._prev_state = state
 
     def _graph_context_text(self) -> str:
         """DP 模式：生成图索引上下文文本（L0 摘要 + 报错节点邻接）。"""
@@ -274,7 +288,8 @@ class AgentFSM:
         self.watchdog.reset_all()
         self.checkpoint.clear()
         self.tool_call_count = 0
-        self.logger.state_enter("init", self.attempt)
+        self._syntax_errors = []
+        self._log_state_enter("init", self.attempt)
 
         # 自动流转到 LOCATE
         self.start()
@@ -290,7 +305,7 @@ class AgentFSM:
 
         print(f"\n--- 第 {self.attempt + 1} 次尝试 (LOCATE) ---")
         print("[LLM] 发送请求到 DeepSeek...")
-        self.logger.state_enter("locate", self.attempt)
+        self._log_state_enter("locate", self.attempt)
 
         def tool_executor(tool_name: str, arguments: dict) -> str:
             print(f"  [TOOL] 调用 {tool_name}({json.dumps(arguments, ensure_ascii=False)})")
@@ -303,11 +318,17 @@ class AgentFSM:
                 self.logger.watchdog_trigger("locate", f"重复调用: {tool_name}")
                 return json.dumps({"error": f"检测到重复调用: {tool_name}"})
 
-            # 追踪 edit 操作
+            # 追踪 edit 操作（记录实际编辑范围，成功时给对应函数加权）
             if tool_name == "edit_function":
                 is_success = "error" not in result_data
                 file_path = arguments.get("file_path", "")
                 self.watchdog.record_edit(file_path, is_success)
+                if is_success:
+                    self._edited_ranges.append((
+                        file_path,
+                        int(arguments.get("start_line", 1)),
+                        int(arguments.get("end_line", 1)),
+                    ))
 
             # 追踪无进展
             stuck, reason = self.watchdog.check_stuck()
@@ -326,6 +347,15 @@ class AgentFSM:
             self.tool_call_count += 1
             return result
 
+        # 语法防火墙驳回后：告知 LLM 上一轮引入的语法错误位置，让它修正
+        if self._syntax_errors:
+            for err in self._syntax_errors:
+                msg = (f"⚠️ 上一轮修改引入了语法错误，请修正后重新提交：\n"
+                       f"文件 {os.path.basename(self.bug_file)} 第 {err.line} 行: {err.msg}")
+                print(f"  [SYNTAX] 注入反馈给 LLM: {msg}")
+                self.messages.append({"role": "user", "content": msg})
+            self._syntax_errors = []
+
         # 调用 LLM
         final_response, conversation = self.client.chat_with_tools(
             messages=self.messages,
@@ -343,11 +373,25 @@ class AgentFSM:
         self.locate_done()
 
     def _on_enter_patch(self) -> None:
-        """PATCH 状态：保存快照，准备测试。"""
+        """PATCH 状态：语法防火墙拦截 + 保存快照，准备测试。"""
+        self._log_state_enter("patch", self.attempt)
+
+        # 语法防火墙：毫秒级 ast.parse 拦截，不进 Docker
+        result = self.syntax_firewall.check_file(self.bug_file)
+        if not result.ok:
+            print(f"[SYNTAX] 语法错误被拦截: {result.summary}")
+            self.logger.rollback_triggered("syntax_error", self.bug_file)
+            self._syntax_errors = result.errors
+            self.attempt += 1
+            if self.attempt >= self.max_retries + 1:
+                self.patch_fail()  # patch → fail（重试耗尽）
+            else:
+                self.patch_syntax_error()  # 回 LOCATE，让 LLM 按行号修正
+            return
+
         # 保存代码快照
         self.checkpoint.save(self.bug_file)
         print(f"[PATCH] 已保存代码快照")
-        self.logger.state_enter("patch", self.attempt)
         self.logger.snapshot_saved(self.bug_file)
 
         # 流转到 TEST
@@ -359,7 +403,7 @@ class AgentFSM:
         if self.watchdog.record_state("test"):
             print("[WATCHDOG] test 状态重复过多，触发失败")
             self.logger.watchdog_trigger("test", "状态重复过多")
-            self.max_retries()
+            self.retries_exhausted()
             return
 
         # 将测试命令转换为容器内路径
@@ -372,7 +416,7 @@ class AgentFSM:
         container_command = ' '.join(container_command.split())
 
         print(f"\n[TEST] 运行测试: {container_command}")
-        self.logger.state_enter("test", self.attempt)
+        self._log_state_enter("test", self.attempt)
 
         from swe_agent.sandbox.docker_runner import run_in_docker
         test_result = run_in_docker(self.code_dir, container_command)
@@ -385,10 +429,11 @@ class AgentFSM:
         self.logger.test_result(test_result.exit_code, test_result.stdout, test_result.stderr)
 
         if test_result.exit_code == 0:
-            # 修复成功：记录动态权重 +1（图索引）
-            node_id = self._bug_file_function_node()
-            if node_id:
+            # 修复成功：给实际编辑的函数动态权重 +1（图索引）
+            targets = self._success_weight_targets()
+            for node_id in targets:
                 self.graph_manager.update_dynamic_weight(node_id)
+                self.logger.jit_update(node=node_id, accepted=True, reason="success")
             self.test_pass()
         else:
             # 恢复快照
@@ -399,12 +444,31 @@ class AgentFSM:
 
             self.attempt += 1
             if self.attempt >= self.max_retries + 1:
-                self.max_retries()
+                self.retries_exhausted()
             else:
                 self.test_fail()
 
-    def _bug_file_function_node(self) -> Optional[str]:
-        """定位 bug 文件中与测试命中相关的函数节点。"""
+    def _success_weight_targets(self) -> list[str]:
+        """解析成功修复实际涉及的函数节点（用于动态权重 +1）。
+
+        优先：根据 edit_function 编辑的行范围，匹配图中包含该范围的文件内函数。
+        兜底：bug 文件中入度最高的函数。
+        """
+        targets = []
+        for file_path, start, end in self._edited_ranges:
+            base = os.path.basename(file_path)
+            for n in self.graph_index.graph.nodes.values():
+                if n.node_type.value != "function":
+                    continue
+                if os.path.basename(n.file) != base:
+                    continue
+                # 编辑行范围与函数体有交集
+                if n.lineno <= end and start <= n.end_lineno:
+                    targets.append(n.node_id)
+        if targets:
+            return list(dict.fromkeys(targets))
+
+        # 兜底：无编辑记录（异常路径），记 bug 文件核心函数
         bug_base = os.path.basename(self.bug_file)
         candidates = []
         for n in self.graph_index.graph.nodes.values():
@@ -413,9 +477,8 @@ class AgentFSM:
             if os.path.basename(n.file) == bug_base:
                 candidates.append(n)
         if not candidates:
-            return None
-        # 优先选择入度最高的（最可能的核心函数）
-        return max(candidates, key=lambda n: n.in_degree).node_id
+            return []
+        return [max(candidates, key=lambda n: n.in_degree).node_id]
 
     def _on_enter_success(self) -> None:
         """SUCCESS 状态：修复成功。"""

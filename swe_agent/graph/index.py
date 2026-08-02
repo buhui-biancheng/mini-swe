@@ -4,7 +4,7 @@
 1. 节点/调用者/被调用者查询
 2. 分层加载：L0 摘要 / L1 邻接展开 / L2 影响半径
 3. 影响面计算（点权 + 距离衰减 + 去环 BFS）
-4. 骨架文本生成（兼容 SkeletonTree 输出格式）
+4. 骨架文本生成（兼容原 SkeletonTree 输出格式）
 5. search_function / expand_function（迁移工具）
 
 点权模型：边不带权重，只负责导航；价值在节点。
@@ -29,12 +29,25 @@ _TRAVERSAL_EDGE_TYPES = {
 class GraphIndex:
     """图索引查询接口。"""
 
-    def __init__(self, graph: GraphData, config: Optional[AgentConfig] = None):
+    def __init__(self, graph: GraphData, config: Optional[AgentConfig] = None,
+                 logger=None):
         self.graph = graph
         self.config = config or AgentConfig()
         self._reverse: dict[str, list[Edge]] = {}   # target -> incoming edges
         self._forward: dict[str, list[Edge]] = {}   # source -> outgoing edges
+        self._logger = logger
+        if self._logger is None:
+            try:
+                from swe_agent.utils.logger import AgentLogger
+                self._logger = AgentLogger()
+            except Exception:
+                self._logger = None
         self._build_adjacency()
+
+    def _log_query(self, query_type: str, node: str = "", hops: int = 1) -> None:
+        """记录图查询事件（DEBUG 级，供 Phase 2 调试 FSM 查询轨迹）。"""
+        if self._logger is not None:
+            self._logger.graph_query(query_type=query_type, node=node, hops=hops)
 
     # ========== 索引构建 ==========
 
@@ -94,6 +107,7 @@ class GraphIndex:
 
     def get_summary(self, traceback_hint: Optional[str] = None) -> dict:
         """L0 摘要：节点数、边数、Top-N 高入度节点、报错命中节点。"""
+        self._log_query("summary")
         nodes = sorted(
             (n for n in self.graph.nodes.values() if n.node_type.value != "resource"),
             key=lambda n: n.in_degree,
@@ -170,6 +184,7 @@ class GraphIndex:
 
     def get_neighbors(self, node_id: str, hops: int = 1) -> dict:
         """L1/L2 邻接展开：指定跳数内的邻居。"""
+        self._log_query("neighbors", node=node_id, hops=hops)
         node = self.graph.nodes.get(node_id)
         if not node:
             return {"error": f"节点不存在: {node_id}"}
@@ -221,6 +236,7 @@ class GraphIndex:
         去环规则：每个节点在一条路径上只能贡献一次影响面。
         点权 = max(1, dynamic_weight) × in_degree_normalized × 衰减因子^跳数
         """
+        self._log_query("impact", node=node_id, hops=max_hops or self.config.max_hops)
         max_hops = max_hops if max_hops is not None else self.config.max_hops
         decay = decay if decay is not None else self.config.decay
         total_cost = 0.0
@@ -254,6 +270,7 @@ class GraphIndex:
                               max_hops: Optional[int] = None,
                               decay: Optional[float] = None) -> dict:
         """影响面计算（含明细，供日志/演示）。"""
+        self._log_query("impact_detail", node=node_id, hops=max_hops or self.config.max_hops)
         max_hops = max_hops if max_hops is not None else self.config.max_hops
         decay = decay if decay is not None else self.config.decay
         total = 0.0
@@ -294,10 +311,10 @@ class GraphIndex:
             "details": details,
         }
 
-    # ========== SkeletonTree 兼容层 ==========
+    # ========== 骨架兼容层 ==========
 
     def generate_skeleton_text(self) -> str:
-        """生成骨架文本（兼容 SkeletonTree 输出格式）。"""
+        """生成骨架文本（兼容原 SkeletonTree 输出格式）。"""
         files: dict[str, list[Node]] = {}
         for n in self.graph.nodes.values():
             if n.node_type.value not in ("function", "class"):
@@ -359,6 +376,17 @@ class GraphIndex:
         except Exception:
             return None
         return "".join(lines[node.lineno - 1: node.end_lineno])
+
+    def get_file_functions(self, file_path: str) -> list[Node]:
+        """获取指定文件的所有函数/方法节点（兼容原 SkeletonTree 接口，不含类）。"""
+        result = []
+        base = os.path.basename(file_path)
+        for n in self.graph.nodes.values():
+            if n.node_type.value != "function":
+                continue
+            if file_path == n.file or os.path.basename(n.file) == base:
+                result.append(n)
+        return result
 
     def _find_node(self, file_path: str, func_name: str) -> Optional[Node]:
         """按文件+函数名定位节点。"""

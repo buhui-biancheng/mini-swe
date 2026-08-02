@@ -60,7 +60,7 @@ def analyze_project_tokens(project_dir: str) -> dict:
     import os
     from swe_agent.graph import GraphManager
 
-    # 构建图索引（迁移：SkeletonTree → GraphIndex）
+    # 构建图索引
     graph_mgr = GraphManager(project_dir)
     graph_index = graph_mgr.build()
 

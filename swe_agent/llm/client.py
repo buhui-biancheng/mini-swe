@@ -125,12 +125,23 @@ class LLMClient:
         # DeepSeek thinking 模式返回 reasoning_content，需要传回
         reasoning_content = getattr(message, "reasoning_content", None)
 
+        self._log_request(usage)
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             usage=usage,
             reasoning_content=reasoning_content,
         )
+
+    def _log_request(self, usage: dict[str, int]) -> None:
+        """记录 LLM 请求 usage（llm_request 事件，结构化日志）。"""
+        if not usage:
+            return
+        try:
+            from swe_agent.utils.logger import AgentLogger
+            AgentLogger().llm_request(self.model, usage)
+        except Exception:
+            pass
 
     def _create_with_retry(self, kwargs: dict[str, Any], max_retries: int = 4):
         """包裹 API 调用，指数退避重试。
@@ -229,6 +240,7 @@ class LLMClient:
                     "total_tokens": chunk.usage.total_tokens,
                 }
 
+        self._log_request(usage)
         return LLMResponse(
             content=content,
             tool_calls=tool_calls_data,

@@ -97,13 +97,14 @@ python eval/run_eval.py --max-instances 5
 ```
 mini-swe/
 ├── swe_agent/
-│   ├── ast_view/          # AST 提取（function_map.py + skeleton.py）
-│   ├── graph/             # 加权图索引（Phase 1）
+│   ├── ast_view/          # AST 提取（function_map.py，骨架已由 graph 模块取代）
+│   ├── graph/             # 加权图索引（Phase 1）+ 语法防火墙（Phase 3）
 │   │   ├── models.py      #   Node/Edge/GraphData Pydantic 模型
 │   │   ├── builder.py     #   AST 扫描建图（调用/数据/全局/继承/导入边）
 │   │   ├── index.py       #   查询 + 分层加载 + 影响面计算
 │   │   ├── manager.py     #   生命周期 + 缓存 + 增量更新
 │   │   ├── persistence.py #   graph.json / graph_weights.json 读写
+│   │   ├── syntax_firewall.py # ast.parse 语法拦截（Phase 3）
 │   │   └── config.py      #   AgentConfig 统一配置
 │   ├── fsm/               # FSM 状态机（agent_fsm.py，DP/Greedy 双模式）
 │   ├── llm/               # DeepSeek API 客户端（指数退避重试）
@@ -155,9 +156,10 @@ mini-swe/
 - [x] 第 3 周：防死循环 + Docker 加固 + 约束解码
 - [x] 第 4 周：评估脚本 + 文档
 - [x] 第 5 周：TUI 终端界面 + 流式思考链
-- [x] **Phase 1：加权图索引**（确定性工程外壳第一步，180+ 测试通过）
+- [x] **Phase 1：加权图索引**（确定性工程外壳第一步）
+- [x] **Phase 3：静态语法防火墙**（ast.parse 毫秒级拦截，190+ 测试通过）
 - [ ] Phase 2：FSM 增强（每轮重置 + 双模降级 + 权限围栏）
-- [ ] Phase 3-6：语法防火墙 / 快照回溯 / JIT 补全 / 两层沙盒
+- [ ] Phase 4-6：快照回溯 / JIT 补全 / 两层沙盒
 
 ## License
 
