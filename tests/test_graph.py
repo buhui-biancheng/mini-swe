@@ -230,6 +230,28 @@ class TestGraphBuilder:
                  and e.edge_type == EdgeType.CALL]
         assert len(edges) == 1
 
+    def test_star_import_hygiene(self, tmp_path):
+        """from x import *：保留模块 import 边，不产生死符号边（* 绑定）。"""
+        src = tmp_path / "proj"
+        src.mkdir()
+        (src / "lib.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        (src / "main.py").write_text(
+            "from lib import *\ndef run():\n    return helper()\n", encoding="utf-8"
+        )
+        mgr = GraphManager(str(src), graph_dir=str(tmp_path / "g"))
+        idx = mgr.build(force=True)
+        edges = idx.graph.edges
+        # 有 main.py → lib.py 的 import 边
+        assert any(
+            e.source == "main.py" and e.target == "lib.py"
+            and e.edge_type == EdgeType.IMPORT
+            for e in edges
+        )
+        # 没有指向 "lib.py::*" 的死边（star import 名字静态不可枚举）
+        assert not any(e.target == "lib.py::*" for e in edges)
+        assert not any(e.source == "main.py::run" and e.target == "lib.py::helper"
+                       for e in edges)  # helper 来自 star import，静态解析不到
+
 
 class TestGraphIndex:
     @pytest.fixture

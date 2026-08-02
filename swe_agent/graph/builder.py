@@ -306,6 +306,13 @@ class GraphBuilder:
                 else:
                     mod = node.module or ""
                 for alias in node.names:
+                    if alias.name == "*":
+                        # from x import *：只保留模块级 import 边，不建名字绑定
+                        # （静态无法枚举公共名字，调用 star 导入的名字留待运行时补全）
+                        fi.imports["*"] = _ImportBinding(kind="module", module_path=mod)
+                        if mod not in fi.imported_module_paths:
+                            fi.imported_module_paths.append(mod)
+                        continue
                     local = alias.asname or alias.name
                     fi.imports[local] = _ImportBinding(
                         kind="symbol", module_path=mod, symbol=alias.name,
