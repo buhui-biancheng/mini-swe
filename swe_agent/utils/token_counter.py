@@ -58,35 +58,39 @@ def analyze_project_tokens(project_dir: str) -> dict:
         包含详细统计信息的字典
     """
     import os
-    from swe_agent.ast_view.skeleton import SkeletonTree
+    from swe_agent.graph import GraphManager
 
-    # 扫描项目
-    tree = SkeletonTree(project_dir)
-    tree.scan()
+    # 构建图索引（迁移：SkeletonTree → GraphIndex）
+    graph_mgr = GraphManager(project_dir)
+    graph_index = graph_mgr.build()
 
     # 生成骨架
-    skeleton_text = tree.generate_skeleton()
+    skeleton_text = graph_index.generate_skeleton_text()
 
     # 计算完整源码的 token
     full_source_parts = []
     file_stats = []
 
-    for file_path, skeleton in tree._file_skeletons.items():
-        if skeleton.error:
-            continue
+    # 按文件分组统计函数数
+    file_functions: dict[str, int] = {}
+    for node in graph_index.graph.nodes.values():
+        if node.node_type.value == "function":
+            file_functions[node.file] = file_functions.get(node.file, 0) + 1
 
+    for file_path in sorted(file_functions.keys()):
+        abs_path = os.path.join(project_dir, file_path)
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(abs_path, 'r', encoding='utf-8') as f:
                 source = f.read()
 
-            rel_path = os.path.relpath(file_path, project_dir)
+            rel_path = os.path.relpath(abs_path, project_dir)
             file_tokens = count_tokens(source)
 
             full_source_parts.append(source)
             file_stats.append({
                 "file": rel_path,
                 "tokens": file_tokens,
-                "functions": len(skeleton.functions),
+                "functions": file_functions[file_path],
             })
         except Exception:
             continue

@@ -2,11 +2,25 @@ import os
 import json
 import time
 from typing import Any, Optional, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from dotenv import load_dotenv
 from openai import OpenAI
+from openai import (
+    APITimeoutError,
+    RateLimitError,
+    APIConnectionError,
+    APIStatusError,
+)
 
 load_dotenv()
+
+
+class AgentAPIError(Exception):
+    """LLM API 持续失败（重试用尽后抛出，FSM 接住走取消事件）。"""
+
+    def __init__(self, message: str = "LLM API 持续失败", retries: int = 0):
+        super().__init__(message)
+        self.retries = retries
 
 
 @dataclass
@@ -83,7 +97,7 @@ class LLMClient:
         if stream:
             return self._handle_stream(kwargs, on_token, on_reasoning_token)
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._create_with_retry(kwargs)
 
         choice = response.choices[0]
         message = choice.message
@@ -118,6 +132,42 @@ class LLMClient:
             reasoning_content=reasoning_content,
         )
 
+    def _create_with_retry(self, kwargs: dict[str, Any], max_retries: int = 4):
+        """包裹 API 调用，指数退避重试。
+
+        - 429 / 超时 / 连接错误 → 重试（退避 2^n 秒）
+        - 5xx → 重试；4xx（参数错误等）→ 不重试直接抛出
+        - 持续失败 → 抛 AgentAPIError（FSM 接住走取消事件）
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+                last_exc = e
+                wait = 2 ** attempt
+                print(f"  [RETRY] LLM API 错误，{wait}秒后重试 ({attempt + 1}/{max_retries}): {type(e).__name__}")
+                time.sleep(wait)
+            except APIStatusError as e:
+                if e.status_code >= 500:
+                    last_exc = e
+                    wait = 2 ** attempt
+                    print(f"  [RETRY] LLM API 5xx，{wait}秒后重试 ({attempt + 1}/{max_retries}): {e.status_code}")
+                    time.sleep(wait)
+                else:
+                    raise  # 4xx 不重试
+            except Exception as e:
+                # 网络层未知错误（如 DNS/连接重置），按可重试处理
+                last_exc = e
+                wait = 2 ** attempt
+                print(f"  [RETRY] LLM API 未知错误，{wait}秒后重试 ({attempt + 1}/{max_retries}): {type(e).__name__}")
+                time.sleep(wait)
+
+        raise AgentAPIError(
+            f"LLM API 持续失败: {type(last_exc).__name__}: {last_exc}",
+            retries=max_retries,
+        ) from last_exc
+
     def _handle_stream(
         self,
         kwargs: dict[str, Any],
@@ -130,7 +180,7 @@ class LLMClient:
         usage = {}
         reasoning_content = ""
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._create_with_retry(kwargs)
 
         for chunk in response:
             if not chunk.choices:

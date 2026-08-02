@@ -5,6 +5,7 @@ import pytest
 from swe_agent.tools.schemas import (
     SearchFunctionArgs,
     ExpandFunctionArgs,
+    ViewFileArgs,
     EditFunctionArgs,
     RunTestArgs,
     TOOLS,
@@ -50,6 +51,17 @@ class TestSchemas:
         assert args.file_path == "test.py"
         assert args.func_name == "foo"
 
+    def test_view_file_args(self):
+        args = ViewFileArgs(file_path="test.py", start_line=3, end_line=5)
+        assert args.file_path == "test.py"
+        assert args.start_line == 3
+        assert args.end_line == 5
+
+    def test_view_file_args_with_context(self):
+        args = ViewFileArgs(file_path="test.py", start_line=3, end_line=3, context=2)
+        assert args.start_line == 3
+        assert args.context == 2
+
     def test_edit_function_args(self):
         args = EditFunctionArgs(
             file_path="test.py", start_line=1, end_line=5, new_code="pass"
@@ -62,7 +74,7 @@ class TestSchemas:
         assert args.command == "pytest test.py"
 
     def test_tools_list_length(self):
-        assert len(TOOLS) == 5
+        assert len(TOOLS) == 6
 
     def test_tools_have_correct_types(self):
         for tool in TOOLS:
@@ -92,6 +104,36 @@ class TestToolRegistry:
     def test_expand_function_not_found(self, registry, sample_file):
         result = json.loads(
             registry.execute("expand_function", {"file_path": sample_file, "func_name": "nope"})
+        )
+        assert "error" in result
+
+    def test_view_file(self, registry, sample_file):
+        result = json.loads(
+            registry.execute("view_file", {"file_path": sample_file, "start_line": 1, "end_line": 3})
+        )
+        assert "content" in result
+        assert "def hello" in result["content"]
+        assert result["start_line"] == 1
+        assert result["end_line"] == 3
+
+    def test_view_file_with_context(self, registry, sample_file):
+        result = json.loads(
+            registry.execute("view_file", {"file_path": sample_file, "start_line": 2, "end_line": 2, "context": 1})
+        )
+        assert "content" in result
+        # context=1 会展开到第 1-3 行
+        assert result["start_line"] == 1
+        assert result["end_line"] == 3
+
+    def test_view_file_line_overflow(self, registry, sample_file):
+        result = json.loads(
+            registry.execute("view_file", {"file_path": sample_file, "start_line": 999})
+        )
+        assert "error" in result
+
+    def test_view_file_not_found(self, registry):
+        result = json.loads(
+            registry.execute("view_file", {"file_path": "/nonexistent/path.py"})
         )
         assert "error" in result
 

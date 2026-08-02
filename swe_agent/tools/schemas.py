@@ -13,6 +13,14 @@ class ExpandFunctionArgs(BaseModel):
     func_name: str = Field(description="函数名，类方法格式为 ClassName.method_name")
 
 
+class ViewFileArgs(BaseModel):
+    """按行号范围查看文件源码（支持指定范围或带上下文的定位）。"""
+    file_path: str = Field(description="要查看的文件路径")
+    start_line: int = Field(description="起始行号（从 1 开始）", default=1)
+    end_line: int = Field(description="结束行号（包含），默认查看从 start_line 到文件末尾")
+    context: int = Field(description="行号前后附加的上下文行数（默认 0）", default=0)
+
+
 class EditFunctionArgs(BaseModel):
     """编辑文件中的指定行范围。"""
     file_path: str = Field(description="要编辑的文件路径")
@@ -35,6 +43,7 @@ class RunCommandArgs(BaseModel):
 TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
     "expand_function": ExpandFunctionArgs,
+    "view_file": ViewFileArgs,
     "edit_function": EditFunctionArgs,
     "run_test": RunTestArgs,
     "run_command": RunCommandArgs,
@@ -79,6 +88,14 @@ TOOLS = [
             "name": "expand_function",
             "description": "查看指定函数的完整源码",
             "parameters": ExpandFunctionArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_file",
+            "description": "按行号范围查看文件源码。支持指定 start_line-end_line 范围，或用 context 参数在指定行前后附加上下文。适合精确定位报错行周围的代码。",
+            "parameters": ViewFileArgs.model_json_schema(),
         },
     },
     {

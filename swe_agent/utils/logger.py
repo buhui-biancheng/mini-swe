@@ -118,6 +118,75 @@ class AgentLogger:
             reason=reason,
         )
 
+    def transition(self, trigger: str, source: str, dest: str) -> None:
+        """记录状态转换。"""
+        self.logger.info(
+            "transition",
+            trigger=trigger,
+            source=source,
+            dest=dest,
+        )
+
+    def rollback_triggered(self, reason: str, file_path: str = "") -> None:
+        """记录回滚触发。"""
+        self.logger.warning(
+            "rollback_triggered",
+            reason=reason,
+            file_path=file_path,
+        )
+
+    def mode_switched(self, from_mode: str, to_mode: str, reason: str) -> None:
+        """记录 DP ↔ Greedy 模式切换。"""
+        self.logger.info(
+            "mode_switched",
+            from_mode=from_mode,
+            to_mode=to_mode,
+            reason=reason,
+        )
+
+    def graph_query(self, query_type: str, node: str = "", hops: int = 1) -> None:
+        """记录图查询。"""
+        self.logger.debug(
+            "graph_query",
+            query_type=query_type,
+            node=node,
+            hops=hops,
+        )
+
+    def graph_build(self, mode: str, node_count: int, edge_count: int,
+                    build_time_ms: float = 0.0) -> None:
+        """记录图构建。"""
+        self.logger.info(
+            "graph_build",
+            mode=mode,  # full / cache / incremental
+            node_count=node_count,
+            edge_count=edge_count,
+            build_time_ms=build_time_ms,
+        )
+
+    def snapshot_saved(self, file_path: str) -> None:
+        """记录快照保存。"""
+        self.logger.debug(
+            "snapshot_saved",
+            file_path=file_path,
+        )
+
+    def snapshot_restored(self, file_path: str) -> None:
+        """记录快照恢复。"""
+        self.logger.warning(
+            "snapshot_restored",
+            file_path=file_path,
+        )
+
+    def jit_update(self, node: str, accepted: bool, reason: str = "") -> None:
+        """记录 JIT 补全（Phase 5 预留）。"""
+        self.logger.info(
+            "jit_update",
+            node=node,
+            accepted=accepted,
+            reason=reason,
+        )
+
     def checkpoint_save(self, file_path: str) -> None:
         """记录快照保存。"""
         self.logger.debug(

@@ -49,13 +49,14 @@ class ChatApp(App):
     def _ensure_registry(self) -> None:
         if self.tool_registry is None:
             from swe_agent.tools.registry import ToolRegistry
-            from swe_agent.ast_view.skeleton import SkeletonTree
-            tree = SkeletonTree(self.current_dir)
-            tree.scan()
-            skeleton_text = tree.generate_skeleton()
+            from swe_agent.graph import GraphManager
+            graph_mgr = GraphManager(self.current_dir)
+            graph_index = graph_mgr.build()
+            skeleton_text = graph_index.generate_skeleton_text()
             self.tool_registry = ToolRegistry(
                 skeleton_text=skeleton_text,
                 code_dir=self.current_dir,
+                graph_index=graph_index,
             )
 
     def compose(self) -> ComposeResult:
@@ -538,6 +539,7 @@ class ChatApp(App):
 - run_command(command): 运行终端命令
 - search_function(name): 搜索函数
 - expand_function(file_path, func_name): 查看函数源码
+- view_file(file_path, start_line, end_line, context): 按行号范围查看代码
 - edit_function(file_path, start_line, end_line, new_code): 编辑代码
 - run_test(command): 运行测试
 

@@ -5,6 +5,7 @@ from typing import Any
 from swe_agent.tools.schemas import (
     SearchFunctionArgs,
     ExpandFunctionArgs,
+    ViewFileArgs,
     EditFunctionArgs,
     RunTestArgs,
     validate_tool_args,
@@ -16,14 +17,18 @@ from swe_agent.sandbox.docker_runner import run_in_docker
 class ToolRegistry:
     """工具注册与调度中心。"""
 
-    def __init__(self, skeleton_text: str = "", code_dir: str = ".", python_version: str = "3.11", packages: list[str] | None = None):
+    def __init__(self, skeleton_text: str = "", code_dir: str = ".",
+                 python_version: str = "3.11", packages: list[str] | None = None,
+                 graph_index=None):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
         self.packages = packages or ["pytest"]
+        self.graph_index = graph_index  # GraphIndex（迁移后优先使用）
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
             "expand_function": self._expand_function,
+            "view_file": self._view_file,
             "edit_function": self._edit_function,
             "run_test": self._run_test,
             "run_command": self._run_command,
@@ -53,11 +58,29 @@ class ToolRegistry:
         return abs_path
 
     def _search_function(self, name: str) -> dict:
+        # 迁移后优先查询图索引节点
+        if self.graph_index is not None:
+            results = self.graph_index.search_function(name)
+            if results:
+                matches = [
+                    f"{r['node']} (lines {r['lines']}, in_degree={r['in_degree']})"
+                    for r in results[:20]
+                ]
+                return {"matches": matches}
+            return {"matches": ["未找到匹配的函数"]}
+
         lines = self.skeleton_text.split("\n")
         matches = [line for line in lines if name.lower() in line.lower()]
         return {"matches": matches if matches else ["未找到匹配的函数"]}
 
     def _expand_function(self, file_path: str, func_name: str) -> dict:
+        # 迁移后优先从图节点行号范围提取源码
+        if self.graph_index is not None:
+            source = self.graph_index.expand_function(file_path, func_name)
+            if source is not None:
+                return {"file": file_path, "function": func_name, "source": source}
+            return {"error": f"未找到函数 {func_name} in {file_path}"}
+
         # 尝试多种路径
         abs_path = os.path.abspath(file_path)
         if not os.path.exists(abs_path):
@@ -73,6 +96,73 @@ class ToolRegistry:
         if source is None:
             return {"error": f"未找到函数 {func_name} in {file_path}"}
         return {"file": file_path, "function": func_name, "source": source}
+
+    def _resolve_path(self, file_path: str) -> str:
+        """尝试多种方式解析文件路径。"""
+        abs_path = os.path.abspath(file_path)
+        if os.path.exists(abs_path):
+            return abs_path
+        abs_path = os.path.join(self.code_dir, file_path)
+        if os.path.exists(abs_path):
+            return abs_path
+        # 在 code_dir 下按文件名查找
+        for root, dirs, files in os.walk(self.code_dir):
+            if os.path.basename(file_path) in files:
+                return os.path.join(root, os.path.basename(file_path))
+        return ""
+
+    def _view_file(self, file_path: str, start_line: int = 1, end_line: int = 0, context: int = 0) -> dict:
+        """按行号范围查看文件源码。
+
+        Args:
+            file_path: 文件路径
+            start_line: 起始行号（从 1 开始）
+            end_line: 结束行号（包含），0 表示到文件末尾
+            context: 行号前后附加的上下文行数
+
+        Returns:
+            包含文件内容、实际行号范围的字典
+        """
+        abs_path = self._resolve_path(file_path)
+        if not abs_path:
+            return {"error": f"文件不存在: {file_path}"}
+
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            return {"error": f"读取文件失败: {e}"}
+
+        total_lines = len(lines)
+
+        # 处理 context 参数（附加上下文）
+        if context > 0:
+            if start_line > 0:
+                start_line = max(1, start_line - context)
+            if end_line > 0:
+                end_line = min(total_lines, end_line + context)
+
+        # 处理边界
+        start_line = max(1, start_line)
+        end_line = min(total_lines, end_line) if end_line > 0 else total_lines
+
+        if start_line > total_lines:
+            return {"error": f"起始行号 {start_line} 超出文件总行数 {total_lines}"}
+        if start_line > end_line:
+            return {"error": f"起始行号 {start_line} 大于结束行号 {end_line}"}
+
+        # 提取内容并带行号
+        content_lines = []
+        for i in range(start_line - 1, end_line):
+            content_lines.append(f"{i + 1:4d} | {lines[i].rstrip()}")
+
+        return {
+            "file": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "content": "\n".join(content_lines),
+        }
 
     def _edit_function(self, file_path: str, start_line: int, end_line: int, new_code: str) -> dict:
         # 尝试多种路径
