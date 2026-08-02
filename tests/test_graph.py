@@ -172,6 +172,43 @@ class TestGoldenStandard:
         elapsed = time.time() - start
         assert elapsed < 2.0, f"构建时间 {elapsed:.2f}s 超出预算"
 
+    def test_large_project_build_time_budget(self, tmp_path):
+        """大项目构建时间预算：合成 1 万行项目 < 2s（计划要求）。
+
+        动态生成 50 个模块 × ~200 行 ≈ 1 万行，跨模块互相调用。
+        这是把"扫描 swe_agent 包 400 节点/0.3s"的经验固化为可复现的自动化测试。
+        """
+        def gen(num_modules=50, funcs_per_module=8, padding=200):
+            src = tmp_path / "bigproj"
+            src.mkdir(exist_ok=True)
+            for mi in range(num_modules):
+                imp = f"import mod_{(mi + 1) % num_modules} as next_mod\n\n"
+                body = []
+                for fi in range(funcs_per_module):
+                    body.append(f"def func_{fi}(a):")
+                    body.append("    b = a + 1")
+                    body.append(f"    return next_mod.func_{(fi + 1) % funcs_per_module}(b)")
+                body += [f"# padding {i}" for i in range(max(0, padding - len(body)))]
+                (src / f"mod_{mi}.py").write_text(imp + "\n".join(body) + "\n", encoding="utf-8")
+            return src
+
+        src = gen()
+        # 确认规模达到 ~1 万行
+        total_lines = sum(1 for f in src.glob("*.py") for _ in f.open())
+        assert total_lines >= 9000, f"合成项目仅 {total_lines} 行，未达规模"
+
+        start = time.time()
+        mgr = GraphManager(str(src), graph_dir=str(tmp_path / "g_big"))
+        idx = mgr.build(force=True)
+        elapsed = time.time() - start
+
+        g = idx.graph
+        assert g.meta.node_count > 300
+        assert g.meta.edge_count > 300
+        assert elapsed < 2.0, (
+            f"1 万行项目构建 {elapsed:.2f}s 超出 2s 预算（节点 {g.meta.node_count}，边 {g.meta.edge_count}）"
+        )
+
     def test_recursion_impact_no_hang(self, tmp_path):
         """递归/相互递归的图，影响面计算不挂死（去环 BFS 验证）。"""
         _, idx = _build_fixture("recursion", tmp_path)
