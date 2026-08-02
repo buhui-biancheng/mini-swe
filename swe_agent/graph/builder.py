@@ -389,9 +389,11 @@ class GraphBuilder:
                     self._method_index.setdefault(m, []).append(method_node)
 
     def _add_edge(self, source: str, target: str, edge_type: EdgeType) -> None:
-        """去重添加边。"""
-        if source == target:
-            return
+        """去重添加边。
+
+        保留自环（A→A 递归）：去环由 GraphIndex 的 visited 集合处理，
+        边本身应存在以反映递归调用关系。
+        """
         key = (source, target, edge_type)
         if key in self._edge_keys:
             return
@@ -703,6 +705,20 @@ class GraphBuilder:
                 if target in self._all_node_ids:
                     return [target]
 
+            # root 是模块别名（import a.b as c; c.func() → 用 module_path 解析）
+            binding = fi.imports.get(root)
+            if binding and binding.kind == "module":
+                # parts 不含 root（如 ['add'] 或 ['b','c']），remainder 是模块后的属性链
+                remainder = ".".join(parts)
+                mod_file = self._module_to_file(binding.module_path)
+                if mod_file:
+                    if remainder:
+                        resolved = self._resolve_module_symbol(mod_file, remainder)
+                        if resolved:
+                            return resolved
+                    else:
+                        return [mod_file]
+
             # 模块属性链解析（最长前缀匹配导入的模块路径）
             match = None
             for mp in sorted(fi.imported_module_paths, key=len, reverse=True):
@@ -724,11 +740,10 @@ class GraphBuilder:
             if root in var_sources:
                 found = []
                 for src in var_sources[root]:
-                    if "::" in src:
-                        cls_name = src.split("::")[1]
-                        target = f"{src}::{final_attr}"
-                        if target in self._all_node_ids:
-                            found.append(target)
+                    # src 形如 "file.py::Circle"（类节点），方法节点是 "file.py::Circle.area"
+                    target = f"{src}.{final_attr}"
+                    if target in self._all_node_ids:
+                        found.append(target)
                 if found:
                     return found
 

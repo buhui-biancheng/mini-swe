@@ -29,6 +29,7 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 # ========== 金标准边集合 ==========
 
 GOLDEN_EDGES = {
+    # 1. 基础调用链 + 数据流级别 2（赋值链）+ 嵌套调用
     "call_graph": {
         ("main.py", "utils.py", "import"),
         ("main.py", "utils.py::helper", "import"),
@@ -38,6 +39,7 @@ GOLDEN_EDGES = {
         ("main.py::nested", "utils.py::helper", "call"),
         ("main.py::nested", "main.py::compute", "call"),
     },
+    # 2. 继承 + 运行时多态全笼罩
     "classes": {
         ("animals.py::Dog", "animals.py::Animal", "inherit"),
         ("animals.py::Cat", "animals.py::Animal", "inherit"),
@@ -45,6 +47,7 @@ GOLDEN_EDGES = {
         ("animals.py::make_sound", "animals.py::Dog.sound", "call"),
         ("animals.py::make_sound", "animals.py::Cat.sound", "call"),
     },
+    # 3. 全局变量节点 + 跨模块全局引用
     "globals": {
         ("app.py", "config.py", "import"),
         ("app.py", "config.py::CONFIG", "import"),
@@ -53,10 +56,52 @@ GOLDEN_EDGES = {
         ("config.py::load", "config.py::CONFIG", "global"),
         ("config.py::get_debug", "config.py::CONFIG", "global"),
     },
+    # 4. 反射：getattr 硬编码全笼罩 + importlib 动态加载打标签
     "reflection": {
         ("services.py::call_by_name", "services.py::ServiceA.run", "call"),
         ("services.py::call_by_name", "services.py::ServiceB.run", "call"),
         ("loader.py::load_literal", "services.py", "import"),
+    },
+    # 5. 局部变量持有类实例 → 精确解析 + 未知类型多态全笼罩
+    "polymorphism_dataflow": {
+        ("geometry.py::Circle", "geometry.py::Shape", "inherit"),
+        ("geometry.py::Rect", "geometry.py::Shape", "inherit"),
+        ("geometry.py::calc", "geometry.py::Shape.area", "call"),
+        ("geometry.py::calc", "geometry.py::Circle.area", "call"),
+        ("geometry.py::calc", "geometry.py::Rect.area", "call"),
+        ("geometry.py::make_circle", "geometry.py::Circle", "call"),
+        ("geometry.py::make_circle", "geometry.py::Circle.area", "call"),
+    },
+    # 6. 自递归（自环）+ 相互递归（去环 BFS 不挂死）
+    "recursion": {
+        ("math.py::fact", "math.py::fact", "call"),
+        ("math.py::is_even", "math.py::is_odd", "call"),
+        ("math.py::is_odd", "math.py::is_even", "call"),
+    },
+    # 7. 局部变量遮蔽全局名（shadow() 不建 global 边）
+    "shadowing": {
+        ("config.py::read", "config.py::CONFIG", "global"),
+    },
+    # 8. 分支数据流全笼罩（x = a() 或 b() → c(x) 建两条数据边）
+    "branch_dataflow": {
+        ("functions.py::pick", "functions.py::a", "call"),
+        ("functions.py::pick", "functions.py::b", "call"),
+        ("functions.py::pick", "functions.py::c", "call"),
+        ("functions.py::b", "functions.py::c", "data"),
+        ("functions.py::a", "functions.py::c", "data"),
+    },
+    # 9. self / super() / 类名静态方法调用 + 继承
+    "self_super": {
+        ("base.py::Child", "base.py::Base", "inherit"),
+        ("base.py::Child.greet", "base.py::Base.greet", "call"),
+        ("base.py::Child.call_self", "base.py::Child.greet", "call"),
+        ("base.py::Child.call_static", "base.py::Base.help", "call"),
+    },
+    # 10. 模块别名导入 + 属性链调用（import pkg.mod as mo; mo.add()）
+    "multi_module": {
+        ("main.py", "pkg/math_ops.py", "import"),
+        ("main.py::run", "pkg/math_ops.py::add", "call"),
+        ("main.py::run2", "pkg/math_ops.py::multiply", "call"),
     },
 }
 
@@ -126,6 +171,23 @@ class TestGoldenStandard:
         _build_fixture("call_graph", tmp_path)
         elapsed = time.time() - start
         assert elapsed < 2.0, f"构建时间 {elapsed:.2f}s 超出预算"
+
+    def test_recursion_impact_no_hang(self, tmp_path):
+        """递归/相互递归的图，影响面计算不挂死（去环 BFS 验证）。"""
+        _, idx = _build_fixture("recursion", tmp_path)
+        # 自环起点
+        impact = idx.compute_impact("math.py::fact", max_hops=5)
+        assert isinstance(impact, float)
+        assert impact >= 0
+        # 相互递归环起点（is_even ↔ is_odd）
+        detail = idx.compute_impact_detail("math.py::is_even", max_hops=10)
+        assert detail["total_cost"] >= 0
+        assert detail["affected_nodes"] > 0
+
+    def test_ten_fixtures_standard(self):
+        """金标准 fixture 数量标准：10 个。"""
+        assert len(GOLDEN_EDGES) == 10
+        assert all(len(edges) >= 1 for edges in GOLDEN_EDGES.values())
 
 
 class TestGraphBuilder:
