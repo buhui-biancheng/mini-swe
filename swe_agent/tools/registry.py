@@ -4,7 +4,6 @@ from typing import Any
 
 from swe_agent.tools.schemas import (
     SearchFunctionArgs,
-    ExpandFunctionArgs,
     ViewFileArgs,
     EditFunctionArgs,
     RunTestArgs,
@@ -15,19 +14,19 @@ from swe_agent.sandbox.docker_runner import run_in_docker
 
 
 class ToolRegistry:
-    """工具注册与调度中心。"""
+    """工具注册与调度中心（Phase 2 简化：5 工具）。"""
 
     def __init__(self, skeleton_text: str = "", code_dir: str = ".",
                  python_version: str = "3.11", packages: list[str] | None = None,
-                 graph_index=None):
+                 graph_index=None, fence=None):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
         self.packages = packages or ["pytest"]
         self.graph_index = graph_index  # GraphIndex（迁移后优先使用）
+        self.fence = fence              # PermissionFence（Phase 2 权限围栏）
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
-            "expand_function": self._expand_function,
             "view_file": self._view_file,
             "edit_function": self._edit_function,
             "run_test": self._run_test,
@@ -73,30 +72,6 @@ class ToolRegistry:
         matches = [line for line in lines if name.lower() in line.lower()]
         return {"matches": matches if matches else ["未找到匹配的函数"]}
 
-    def _expand_function(self, file_path: str, func_name: str) -> dict:
-        # 迁移后优先从图节点行号范围提取源码
-        if self.graph_index is not None:
-            source = self.graph_index.expand_function(file_path, func_name)
-            if source is not None:
-                return {"file": file_path, "function": func_name, "source": source}
-            return {"error": f"未找到函数 {func_name} in {file_path}"}
-
-        # 尝试多种路径
-        abs_path = os.path.abspath(file_path)
-        if not os.path.exists(abs_path):
-            abs_path = os.path.join(self.code_dir, file_path)
-        if not os.path.exists(abs_path):
-            # 尝试在 code_dir 下查找
-            for root, dirs, files in os.walk(self.code_dir):
-                if os.path.basename(file_path) in files:
-                    abs_path = os.path.join(root, os.path.basename(file_path))
-                    break
-
-        source = get_function_source(abs_path, func_name)
-        if source is None:
-            return {"error": f"未找到函数 {func_name} in {file_path}"}
-        return {"file": file_path, "function": func_name, "source": source}
-
     def _resolve_path(self, file_path: str) -> str:
         """尝试多种方式解析文件路径。"""
         abs_path = os.path.abspath(file_path)
@@ -111,18 +86,67 @@ class ToolRegistry:
                 return os.path.join(root, os.path.basename(file_path))
         return ""
 
-    def _view_file(self, file_path: str, start_line: int = 1, end_line: int = 0, context: int = 0) -> dict:
-        """按行号范围查看文件源码。
+    def _view_file(self, file_path: str, function: str = None, line: int = None,
+                   context: int = 0, start_line: int = None, end_line: int = None) -> dict:
+        """查看文件（三模式，Phase 2 模块 D3）。
 
-        Args:
-            file_path: 文件路径
-            start_line: 起始行号（从 1 开始）
-            end_line: 结束行号（包含），0 表示到文件末尾
-            context: 行号前后附加的上下文行数
-
-        Returns:
-            包含文件内容、实际行号范围的字典
+        模式 1（function）：读整个函数，未精确匹配返回模糊候选
+        模式 2（line + context）：报错行周围
+        模式 3（start_line + end_line）：精确行范围（含读日志）
         """
+        # 模式 1：语义读（吸收原 expand_function）
+        if function:
+            return self._view_function(file_path, function)
+
+        # 模式 2：定位读（line 给出）
+        if line is not None:
+            if start_line is None:
+                start_line = max(1, line - context) if context > 0 else line
+            if end_line is None:
+                end_line = line + context if context > 0 else line
+
+        # 模式 3：范围读（context 也可附带展开 start/end）
+        if context > 0:
+            if start_line is not None and start_line > 0:
+                start_line = max(1, start_line - context)
+            if end_line is not None and end_line > 0:
+                end_line = end_line + context
+
+        if start_line is None:
+            start_line = 1
+        if end_line is None:
+            end_line = 0  # 0 表示到文件末尾
+
+        return self._read_lines(file_path, start_line, end_line)
+
+    def _view_function(self, file_path: str, func_name: str) -> dict:
+        """模式 1：读整个函数（查图节点行号范围）。"""
+        if self.graph_index is not None:
+            node = self.graph_index.find_node(file_path, func_name)
+            if node is not None:
+                return self._read_lines(node.file, node.lineno, node.end_lineno, label=func_name)
+            # 未精确匹配 → 返回模糊候选（兜底，不报死）
+            matches = self.graph_index.search_nodes(func_name, limit=10)
+            return {"function": func_name, "candidates": [m.node_id for m in matches]}
+
+        # 无图时退化为旧逻辑（统一返回 content 键）
+        abs_path = self._resolve_path(file_path)
+        if not abs_path:
+            return {"error": f"文件不存在: {file_path}"}
+        source = get_function_source(abs_path, func_name)
+        if source is None:
+            return {"error": f"未找到函数 {func_name} in {file_path}"}
+        return {
+            "file": file_path,
+            "function": func_name,
+            "content": source,
+            "start_line": 1,
+            "end_line": 0,
+        }
+
+    def _read_lines(self, file_path: str, start_line: int, end_line: int,
+                    label: str = "") -> dict:
+        """按行范围读取文件（带行号）。"""
         abs_path = self._resolve_path(file_path)
         if not abs_path:
             return {"error": f"文件不存在: {file_path}"}
@@ -134,15 +158,6 @@ class ToolRegistry:
             return {"error": f"读取文件失败: {e}"}
 
         total_lines = len(lines)
-
-        # 处理 context 参数（附加上下文）
-        if context > 0:
-            if start_line > 0:
-                start_line = max(1, start_line - context)
-            if end_line > 0:
-                end_line = min(total_lines, end_line + context)
-
-        # 处理边界
         start_line = max(1, start_line)
         end_line = min(total_lines, end_line) if end_line > 0 else total_lines
 
@@ -151,20 +166,30 @@ class ToolRegistry:
         if start_line > end_line:
             return {"error": f"起始行号 {start_line} 大于结束行号 {end_line}"}
 
-        # 提取内容并带行号
         content_lines = []
         for i in range(start_line - 1, end_line):
             content_lines.append(f"{i + 1:4d} | {lines[i].rstrip()}")
 
-        return {
+        result = {
             "file": file_path,
             "start_line": start_line,
             "end_line": end_line,
             "total_lines": total_lines,
             "content": "\n".join(content_lines),
         }
+        if label:
+            result["function"] = label
+        return result
 
     def _edit_function(self, file_path: str, start_line: int, end_line: int, new_code: str) -> dict:
+        # 围栏软约束：警告 + 代价惩罚，不拦截（bug 所在文件必须能修）
+        fence_warnings = []
+        fence_penalty = 1.0
+        if self.fence is not None:
+            fence_check = self.fence.check_edit(file_path)
+            fence_warnings = fence_check.warnings
+            fence_penalty = fence_check.penalty
+
         # 尝试多种路径
         abs_path = os.path.abspath(file_path)
         if not os.path.exists(abs_path):
@@ -188,7 +213,11 @@ class ToolRegistry:
         with open(abs_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
-        return {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}"}
+        result = {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}"}
+        if fence_warnings:
+            result["warning"] = "；".join(fence_warnings)
+            result["penalty"] = fence_penalty
+        return result
 
     def _run_test(self, command: str) -> dict:
         # 将命令中的宿主机绝对路径转换为容器内路径

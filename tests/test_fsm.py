@@ -221,4 +221,5 @@ class TestAgentFSM:
         )
 
         assert isinstance(fsm.state, str)
-        assert fsm.state in ["init", "locate", "patch", "test", "success", "fail"]
+        # Phase 2 新增 check / rollback 状态
+        assert fsm.state in ["init", "locate", "patch", "check", "test", "rollback", "success", "fail"]

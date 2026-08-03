@@ -4,7 +4,6 @@ import tempfile
 import pytest
 from swe_agent.tools.schemas import (
     SearchFunctionArgs,
-    ExpandFunctionArgs,
     ViewFileArgs,
     EditFunctionArgs,
     RunTestArgs,
@@ -46,16 +45,21 @@ class TestSchemas:
         args = SearchFunctionArgs(name="foo")
         assert args.name == "foo"
 
-    def test_expand_function_args(self):
-        args = ExpandFunctionArgs(file_path="test.py", func_name="foo")
-        assert args.file_path == "test.py"
-        assert args.func_name == "foo"
-
     def test_view_file_args(self):
         args = ViewFileArgs(file_path="test.py", start_line=3, end_line=5)
         assert args.file_path == "test.py"
         assert args.start_line == 3
         assert args.end_line == 5
+
+    def test_view_file_args_function_mode(self):
+        args = ViewFileArgs(file_path="test.py", function="hello")
+        assert args.function == "hello"
+        assert args.line is None
+
+    def test_view_file_args_line_mode(self):
+        args = ViewFileArgs(file_path="test.py", line=42, context=5)
+        assert args.line == 42
+        assert args.context == 5
 
     def test_view_file_args_with_context(self):
         args = ViewFileArgs(file_path="test.py", start_line=3, end_line=3, context=2)
@@ -74,7 +78,8 @@ class TestSchemas:
         assert args.command == "pytest test.py"
 
     def test_tools_list_length(self):
-        assert len(TOOLS) == 6
+        # Phase 2 简化：expand 并入 view_file，6 → 5 工具
+        assert len(TOOLS) == 5
 
     def test_tools_have_correct_types(self):
         for tool in TOOLS:
@@ -94,18 +99,21 @@ class TestToolRegistry:
         assert "matches" in result
         assert "未找到" in result["matches"][0]
 
-    def test_expand_function(self, registry, sample_file):
+    def test_view_file_function_mode(self, registry, sample_file):
+        """模式 1：function 读整个函数（吸收 expand_function）。"""
         result = json.loads(
-            registry.execute("expand_function", {"file_path": sample_file, "func_name": "hello"})
+            registry.execute("view_file", {"file_path": sample_file, "function": "hello"})
         )
-        assert "source" in result
-        assert "def hello" in result["source"]
+        assert "content" in result
+        assert "def hello" in result["content"]
+        assert result["function"] == "hello"
 
-    def test_expand_function_not_found(self, registry, sample_file):
+    def test_view_file_function_mode_not_found(self, registry, sample_file):
+        """模式 1 未精确匹配 → 返回模糊候选（兜底，不报死）。"""
         result = json.loads(
-            registry.execute("expand_function", {"file_path": sample_file, "func_name": "nope"})
+            registry.execute("view_file", {"file_path": sample_file, "function": "nope"})
         )
-        assert "error" in result
+        assert "candidates" in result or "error" in result
 
     def test_view_file(self, registry, sample_file):
         result = json.loads(

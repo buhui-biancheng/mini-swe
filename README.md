@@ -12,7 +12,10 @@ mini-swe 是一个基于有限状态机（FSM）的自动化代码修复 Agent �
 ### 核心特性
 
 - **加权图索引（Phase 1）**：AST 全库扫描构建调用/数据/全局/继承/导入图，分层加载（L0 摘要/L1 邻接/L2 影响半径），影响面计算辅助全局决策
-- **FSM 状态机驱动**：6 个状态（INIT → LOCATE → PATCH → TEST → SUCCESS/FAIL），流程清晰可控，支持 DP/Greedy 双模式
+- **FSM 增强（Phase 2）**：每轮从 Traceback 新起点独立规划、CHECK 语法防火墙 + 影响面分析、ROLLBACK 代价熔断、DP→Greedy 双模降级、权限围栏软约束、取消回滚事件、TokenBudget 预算管理
+- **日志解析器（Phase 2）**：TEST 出口把红色测试解析为结构化错误路径，完整日志落盘 `.graph/last_test.log`，AI 按行号回读
+- **提示词分级架构（Phase 2）**：base/locate/patch/error_locating/rollback/degrade/success 分层注入，system 每轮重建，token 固定不随轮数累积
+- **工具集简化（Phase 2）**：expand 合并进 view_file 三模式（function/line/range），6 → 5 工具
 - **AST 上下文压缩**：骨架树提取函数签名，压缩 prompt 50%+ Token
 - **Docker 安全沙盒**：隔离执行环境，危险命令拦截，网络禁用，只读文件系统
 - **防死循环机制**：Watchdog 计数器 + Checkpoint 代码快照 + 指数退避重试
@@ -24,20 +27,30 @@ mini-swe 是一个基于有限状态机（FSM）的自动化代码修复 Agent �
 ```mermaid
 graph TD
     A[用户输入 Bug 文件] --> B[INIT: 初始化]
-    B --> C[LOCATE: 调用 LLM 定位 Bug]
-    C --> D[PATCH: 保存代码快照]
-    D --> E[TEST: Docker 沙盒运行测试]
-    E -->|通过| F[SUCCESS: 修复成功]
-    E -->|失败| C
-    E -->|超限| G[FAIL: 修复失败]
+    B --> C[LOCATE: 调用 LLM 定位 Bug（每轮新起点）]
+    C --> D[PATCH: 保存初始快照]
+    D --> E[CHECK: 语法防火墙 + 影响面]
+    E -->|语法错误| D
+    E -->|连续失败| H[ROLLBACK]
+    E --> F[TEST: Docker 沙盒运行测试]
+    F -->|通过| G[SUCCESS: 修复成功 + 图权重+1]
+    F -->|失败, 影响面<阈值| C
+    F -->|影响面>=阈值| H
+    H -->|回滚<3次| C
+    H -->|DP失效| I[降级 Greedy]
+    I --> C
+    H -->|Greedy仍失败| J[FAIL]
 
     subgraph "核心组件"
-        H[LLM Client] --> C
-        I[Graph Index] --> C
-        J[Tool Registry] --> C
-        K[Watchdog] --> C
-        L[Checkpoint] --> D
-        M[Graph Builder] --> I
+        K[LLM Client] --> C
+        L[Graph Index] --> C
+        M[Tool Registry] --> C
+        N[Watchdog] --> C
+        O[Checkpoint] --> D
+        P[Graph Builder] --> L
+        Q[PromptManager] --> C
+        R[PermissionFence] --> D
+        S[TokenBudget] --> C
     end
 ```
 
@@ -98,23 +111,30 @@ python eval/run_eval.py --max-instances 5
 mini-swe/
 ├── swe_agent/
 │   ├── ast_view/          # AST 提取（function_map.py，骨架已由 graph 模块取代）
-│   ├── graph/             # 加权图索引（Phase 1）+ 语法防火墙（Phase 3）
+│   ├── graph/             # 加权图索引（Phase 1）+ 语法防火墙（Phase 3）+ Phase 2 模块
 │   │   ├── models.py      #   Node/Edge/GraphData Pydantic 模型
 │   │   ├── builder.py     #   AST 扫描建图（调用/数据/全局/继承/导入边）
-│   │   ├── index.py       #   查询 + 分层加载 + 影响面计算
+│   │   ├── index.py       #   查询 + 分层加载 + 影响面计算 + find_node/resolve_location
 │   │   ├── manager.py     #   生命周期 + 缓存 + 增量更新
 │   │   ├── persistence.py #   graph.json / graph_weights.json 读写
 │   │   ├── syntax_firewall.py # ast.parse 语法拦截（Phase 3）
+│   │   ├── traceback_parser.py # Traceback 三规则解析（Phase 2 模块 E2）
+│   │   ├── log_parser.py  #   测试日志解析（Phase 2 模块 D）
+│   │   ├── permission.py  #   权限围栏软约束（Phase 2 模块 B）
+│   │   ├── impact.py      #   变更影响面分析（Phase 2 模块 C）
 │   │   └── config.py      #   AgentConfig 统一配置
-│   ├── fsm/               # FSM 状态机（agent_fsm.py，DP/Greedy 双模式）
+│   ├── fsm/               # FSM 状态机（agent_fsm.py，8 状态含 CHECK/ROLLBACK）
+│   │   ├── cancel_handler.py # 统一取消/超时/错误处理（Phase 2 模块 E）
+│   │   └── token_budget.py   # Token 预算管理（Phase 2 模块 E3）
+│   ├── prompts/           # 分级提示词（base/locate/patch/error_locating/rollback/degrade/success）
 │   ├── llm/               # DeepSeek API 客户端（指数退避重试）
 │   ├── sandbox/           # Docker 沙盒执行器
-│   ├── tools/             # 工具系统（schemas + registry）
+│   ├── tools/             # 工具系统（schemas + registry，5 工具）
 │   ├── tui/               # TUI 终端界面（Textual）
 │   ├── utils/             # 工具函数（token_counter.py + logger.py）
 │   ├── cli.py             # graph build/stats/viz 命令
 │   └── main.py            # 主入口
-├── tests/                 # 单元测试（180+ 个，含图金标准测试）
+├── tests/                 # 单元测试（249 个，含图金标准测试）
 │   └── fixtures/          # 图金标准测试小项目（10 个，覆盖多态/递归/遮蔽/分支数据流等）
 ├── examples/              # 示例 bug 文件
 ├── eval/                  # 评测脚本与数据
@@ -157,8 +177,8 @@ mini-swe/
 - [x] 第 4 周：评估脚本 + 文档
 - [x] 第 5 周：TUI 终端界面 + 流式思考链
 - [x] **Phase 1：加权图索引**（确定性工程外壳第一步）
-- [x] **Phase 3：静态语法防火墙**（ast.parse 毫秒级拦截，190+ 测试通过）
-- [ ] Phase 2：FSM 增强（每轮重置 + 双模降级 + 权限围栏）
+- [x] **Phase 3：静态语法防火墙**（ast.parse 毫秒级拦截）
+- [x] **Phase 2：FSM 增强**（每轮重置 + 双模降级 + 权限围栏 + 日志解析器 + 提示词分级，249 测试通过）
 - [ ] Phase 4-6：快照回溯 / JIT 补全 / 两层沙盒
 
 ## License

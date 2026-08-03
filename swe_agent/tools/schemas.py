@@ -7,18 +7,19 @@ class SearchFunctionArgs(BaseModel):
     name: str = Field(description="要搜索的函数名")
 
 
-class ExpandFunctionArgs(BaseModel):
-    """展开查看指定函数的完整源码。"""
-    file_path: str = Field(description="Python 文件路径")
-    func_name: str = Field(description="函数名，类方法格式为 ClassName.method_name")
-
-
 class ViewFileArgs(BaseModel):
-    """按行号范围查看文件源码（支持指定范围或带上下文的定位）。"""
+    """查看文件（三模式，Phase 2 模块 D3）。
+
+    模式 1（function）：读整个函数（吸收原 expand_function）
+    模式 2（line + context）：报错行周围
+    模式 3（start_line + end_line）：精确行范围（可读 .graph/last_test.log）
+    """
     file_path: str = Field(description="要查看的文件路径")
-    start_line: int = Field(description="起始行号（从 1 开始）", default=1)
-    end_line: int = Field(description="结束行号（包含），默认查看从 start_line 到文件末尾")
-    context: int = Field(description="行号前后附加的上下文行数（默认 0）", default=0)
+    function: Optional[str] = Field(description="模式 1：函数名", default=None)
+    line: Optional[int] = Field(description="模式 2：目标行号", default=None)
+    context: int = Field(description="模式 2：行号前后附加的上下文行数（默认 0）", default=0)
+    start_line: Optional[int] = Field(description="模式 3：起始行号（从 1 开始）", default=None)
+    end_line: Optional[int] = Field(description="模式 3：结束行号（包含），默认到文件末尾", default=None)
 
 
 class EditFunctionArgs(BaseModel):
@@ -39,10 +40,9 @@ class RunCommandArgs(BaseModel):
     command: str = Field(description="要执行的终端命令，如 'ls -la'")
 
 
-# 工具名称到 Schema 的映射
+# 工具名称到 Schema 的映射（Phase 2 简化：expand 并入 view_file，6 → 5）
 TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
-    "expand_function": ExpandFunctionArgs,
     "view_file": ViewFileArgs,
     "edit_function": EditFunctionArgs,
     "run_test": RunTestArgs,
@@ -72,7 +72,7 @@ def validate_tool_args(tool_name: str, args: dict[str, Any]) -> tuple[bool, Opti
         return False, error_msg, None
 
 
-# Function Calling 工具定义（OpenAI 格式）
+# Function Calling 工具定义（OpenAI 格式，Phase 2 简化：5 工具）
 TOOLS = [
     {
         "type": "function",
@@ -85,16 +85,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "expand_function",
-            "description": "查看指定函数的完整源码",
-            "parameters": ExpandFunctionArgs.model_json_schema(),
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "view_file",
-            "description": "按行号范围查看文件源码。支持指定 start_line-end_line 范围，或用 context 参数在指定行前后附加上下文。适合精确定位报错行周围的代码。",
+            "description": "查看文件源码，三模式：function='函数名' 读整个函数；line=行号,context=N 读报错行周围；start_line+end_line 精确读行范围（可读 .graph/last_test.log 日志）",
             "parameters": ViewFileArgs.model_json_schema(),
         },
     },

@@ -95,10 +95,12 @@ class TestFSMSyntaxFirewallIntegration:
         fsm, bug = self._make_fsm(tmp_path, monkeypatch, "def broken(:\n    pass\n")
         calls = []
 
-        def fake_chat(messages, tools=None, tool_executor=None, max_rounds=5):
+        def fake_chat(messages, tools=None, tool_executor=None, max_rounds=5, usage_callback=None):
             calls.append(list(messages))
             # 模拟 LLM 看到语法错误反馈后修好文件
             bug.write_text("def broken():\n    pass\n", encoding="utf-8")
+            if usage_callback:
+                usage_callback({})
             return ("fixed", messages)
 
         fsm.client.chat_with_tools = fake_chat

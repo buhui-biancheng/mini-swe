@@ -321,67 +321,69 @@ class ChatApp(App):
                 })
             self.conversation_history.append({"role": "user", "content": user_message})
 
-            # 创建思考链 widget（立即显示，后续流式更新）
+            # 多轮工具循环（TUI 修复）：每轮流式思考 + 执行工具，直到无工具调用
+            # 根因：旧实现只做"一轮工具 + 一次收尾"，收尾那轮若还想调工具会被静默丢弃 → 对话断流
             from .widgets.thinking_widget import ThinkingWidget
-            thinking_widget = ThinkingWidget("思考中...", collapsed=False)
-            thinking_content = []
-            thinking_count = [0]
-            response_content = []
-
-            def on_reasoning(token: str):
-                """思考链 token（在 executor 线程中运行）。"""
-                thinking_content.append(token)
-                thinking_count[0] += 1
-                if thinking_count[0] % 10 == 0 and thinking_widget:
-                    self.call_from_thread(
-                        thinking_widget.update_content,
-                        "".join(thinking_content),
-                    )
-
-            def on_content(token: str):
-                """内容 token（在 executor 线程中运行）。"""
-                response_content.append(token)
-
-            # 立即显示思考链 widget（直接调用，我们在主线程）
-            if self.message_list:
-                self.message_list.mount(thinking_widget)
-
-            self.set_status("calling_tool")
-
-            # LLM 调用（在 executor 线程中，不阻塞 UI）
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.llm_client.chat(
-                    messages=self.conversation_history,
-                    tools=self.tools,
-                    thinking=True,
-                    reasoning_effort="max",
-                    stream=True,
-                    on_reasoning_token=on_reasoning,
-                    on_token=on_content,
-                ),
-            )
+            max_rounds = 8
 
-            # 最终更新思考链
-            if thinking_content:
-                thinking_widget.update_content("".join(thinking_content))
-                thinking_widget.collapsed = True
+            for _round in range(max_rounds):
+                thinking_widget = ThinkingWidget("思考中...", collapsed=False)
+                thinking_content = []
+                thinking_count = [0]
+                response_content = []
 
-            # 优先用流式收集的内容，fallback 到 response.content
-            final_content = "".join(response_content) if response_content else (response.content or "")
-            assistant_msg = {"role": "assistant", "content": final_content}
-            if response.reasoning_content:
-                assistant_msg["reasoning_content"] = response.reasoning_content
-            if response.tool_calls:
-                assistant_msg["tool_calls"] = response.tool_calls
-            self.conversation_history.append(assistant_msg)
+                def on_reasoning(token, _w=thinking_widget, _c=thinking_content, _n=thinking_count):
+                    """思考链 token（在 executor 线程中运行）。每 5 个 token 刷新一次。"""
+                    _c.append(token)
+                    _n[0] += 1
+                    if _n[0] % 5 == 0:
+                        self.call_from_thread(_w.update_content, "".join(_c))
 
-            # 显示 AI 回复（如果有的话）
-            if final_content and not response.tool_calls:
-                self.add_ai_message(final_content)
+                def on_content(token, _c=response_content):
+                    """内容 token（在 executor 线程中运行）。"""
+                    _c.append(token)
 
-            if response.tool_calls:
+                if self.message_list:
+                    self.message_list.mount(thinking_widget)
+                self.set_status("calling_tool")
+
+                # LLM 调用（流式，在 executor 线程中，不阻塞 UI）
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.llm_client.chat(
+                        messages=self.conversation_history,
+                        tools=self.tools,
+                        thinking=True,
+                        reasoning_effort="max",
+                        stream=True,
+                        on_reasoning_token=on_reasoning,
+                        on_token=on_content,
+                    ),
+                )
+
+                # 最终更新思考链（保证短思考也能完整显示）
+                if thinking_content:
+                    thinking_widget.update_content("".join(thinking_content))
+                    thinking_widget.collapsed = True
+
+                final_content = "".join(response_content) if response_content else (response.content or "")
+
+                # 记录 assistant 消息（含 tool_calls，供下一轮使用）
+                assistant_msg = {"role": "assistant", "content": final_content}
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                if response.tool_calls:
+                    assistant_msg["tool_calls"] = response.tool_calls
+                self.conversation_history.append(assistant_msg)
+
+                if not response.tool_calls:
+                    # 无工具调用 → 最终回复
+                    if final_content:
+                        self.add_ai_message(final_content)
+                    break
+
+                # 有工具调用 → 逐个执行，然后进入下一轮（不再断流）
                 for tc in response.tool_calls:
                     func_name = tc["function"]["name"]
                     try:
@@ -389,10 +391,8 @@ class ChatApp(App):
                     except json.JSONDecodeError:
                         args = {}
 
-                    # 工具调用 UI（直接调用，我们在主线程）
                     self.add_tool_call(func_name, args)
 
-                    # 工具执行（在 executor 线程中，不阻塞 UI）
                     result = await loop.run_in_executor(
                         None,
                         lambda n=func_name, a=args: self.tool_registry.execute(n, a),
@@ -409,56 +409,9 @@ class ChatApp(App):
                         "tool_call_id": tc["id"],
                         "content": str(result),
                     })
-
-                # 最终 LLM 调用（流式，思考链实时显示）
-                self.set_status("calling_tool")
-                thinking2_widget = ThinkingWidget("思考中...", collapsed=False)
-                thinking2_content = []
-                thinking2_count = [0]
-                content2_content = []
-
-                def on_reasoning2(token: str):
-                    thinking2_content.append(token)
-                    thinking2_count[0] += 1
-                    if thinking2_count[0] % 10 == 0 and thinking2_widget:
-                        self.call_from_thread(
-                            thinking2_widget.update_content,
-                            "".join(thinking2_content),
-                        )
-
-                def on_content2(token: str):
-                    content2_content.append(token)
-
-                if self.message_list:
-                    self.message_list.mount(thinking2_widget)
-
-                final_response = await loop.run_in_executor(
-                    None,
-                    lambda: self.llm_client.chat(
-                        messages=self.conversation_history,
-                        tools=self.tools,
-                        thinking=True,
-                        reasoning_effort="max",
-                        stream=True,
-                        on_reasoning_token=on_reasoning2,
-                        on_token=on_content2,
-                    ),
-                )
-                if thinking2_content:
-                    thinking2_widget.update_content("".join(thinking2_content))
-                    thinking2_widget.collapsed = True
-
-                # 优先用流式收集的内容
-                final_content2 = "".join(content2_content) if content2_content else (final_response.content or "")
-                final_msg = {"role": "assistant", "content": final_content2}
-                if final_response.reasoning_content:
-                    final_msg["reasoning_content"] = final_response.reasoning_content
-                self.conversation_history.append(final_msg)
-                if final_content2:
-                    self.add_ai_message(final_content2)
             else:
-                if final_content:
-                    self.add_ai_message(final_content)
+                # for 正常结束（未 break）= 达到 max_rounds 仍无最终回复
+                self.add_ai_message("（已达到最大对话轮数，工具循环可能仍未收敛）")
 
             self.set_status("idle")
         except Exception as e:
@@ -501,13 +454,35 @@ class ChatApp(App):
             self.add_ai_message(f"错误: {e}")
             self.set_status("fail")
 
+    _STATE_LABELS = {
+        "init": "初始化", "locate": "定位", "patch": "补丁",
+        "check": "检查", "test": "测试", "rollback": "回滚",
+        "success": "成功", "fail": "失败",
+    }
+
     def _parse_agent_output(self, line: str) -> None:
-        if "[INIT]" in line:
+        if "[STATE]" in line:
+            state = line.split("[STATE] ")[1].split(" (")[0]
+            label = self._STATE_LABELS.get(state, state)
+            self._add_system(f"▶ 状态流转 → {label}")
+        elif "[INIT]" in line:
             self._add_system(f"INIT — {line.replace('[INIT] ', '')}")
         elif "[LOCATE]" in line:
             self._add_system("LOCATE — 分析代码...")
         elif "[PATCH]" in line:
             self._add_system("PATCH — 应用修复...")
+        elif "[CHECK]" in line:
+            self._add_system(f"CHECK — {line.replace('[CHECK] ', '')}")
+        elif "[ROLLBACK]" in line:
+            self._add_system(f"ROLLBACK — {line.replace('[ROLLBACK] ', '')}")
+        elif "[MODE]" in line:
+            self._add_system(f"MODE — {line.replace('[MODE] ', '')}")
+        elif "[BUDGET]" in line:
+            self._add_system(f"BUDGET — {line.replace('[BUDGET] ', '')}")
+        elif "[SYNTAX]" in line:
+            self._add_system(f"SYNTAX — {line.replace('[SYNTAX] ', '')}")
+        elif "[LOG]" in line:
+            self._add_system(f"LOG — {line.replace('[LOG] ', '')[:120]}")
         elif "[TEST]" in line and "运行测试" in line:
             self._add_system("TEST — 运行测试...")
         elif "[SUCCESS]" in line:
@@ -538,8 +513,7 @@ class ChatApp(App):
 可用工具:
 - run_command(command): 运行终端命令
 - search_function(name): 搜索函数
-- expand_function(file_path, func_name): 查看函数源码
-- view_file(file_path, start_line, end_line, context): 按行号范围查看代码
+- view_file(file_path, function="函数名" | line+context | start_line+end_line): 查看代码
 - edit_function(file_path, start_line, end_line, new_code): 编辑代码
 - run_test(command): 运行测试
 

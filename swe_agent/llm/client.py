@@ -255,6 +255,7 @@ class LLMClient:
         tool_executor: callable,
         max_rounds: int = 5,
         max_retries: int = 3,
+        usage_callback: Optional[Callable[[dict], None]] = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """带工具调用的多轮对话。
 
@@ -264,6 +265,7 @@ class LLMClient:
             tool_executor: 工具执行函数，接收 (tool_name, arguments) 返回结果字符串
             max_rounds: 最大工具调用轮数
             max_retries: JSON 解析失败时最大重试次数
+            usage_callback: 每次 LLM 调用后回调 usage（供 TokenBudget 汇总，Phase 2 模块 E3）
 
         Returns:
             (最终回复文本, 完整对话历史)
@@ -272,6 +274,8 @@ class LLMClient:
 
         for _ in range(max_rounds):
             response = self.chat(conversation, tools=tools)
+            if usage_callback is not None:
+                usage_callback(response.usage)
 
             if not response.tool_calls:
                 return response.content or "", conversation

@@ -19,7 +19,7 @@ SYSTEM_PROMPT = """\
 
 工作流程：
 1. 使用 search_function 搜索相关函数
-2. 使用 expand_function 查看函数的完整源码，或用 view_file 按行号范围精确定位代码（如查看报错行周围的代码）
+2. 使用 view_file 查看代码（function="函数名" 读整个函数 / line+context 读报错行周围 / start_line+end_line 读行范围）
 3. 分析代码，找到 bug
 4. 使用 edit_function 修复 bug（指定文件路径、起始行、结束行、新代码）
 5. 使用 run_test 运行测试验证修复

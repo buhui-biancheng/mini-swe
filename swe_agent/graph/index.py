@@ -69,6 +69,32 @@ class GraphIndex:
         """获取单个节点。"""
         return self.graph.nodes.get(node_id)
 
+    def is_test_file(self, file_path: str) -> bool:
+        """确定性识别测试文件（不依赖命名规范外的任何假设）。
+
+        规则（任一命中即测试文件）：
+            - 路径含 tests/ 目录段
+            - 文件名 test_ 前缀（test_xxx.py）
+            - 文件名 _test.py / _tests.py 后缀
+
+        用途：影响面计算排除测试节点（测试调用不算生产影响面），
+             以及 Phase 7 诊断阶段发现测试锚点。
+        """
+        p = file_path.replace("\\", "/")
+        segs = p.split("/")
+        if "tests" in segs:
+            return True
+        base = os.path.basename(p)
+        return (
+            base.startswith("test_")
+            or base.endswith("_test.py")
+            or base.endswith("_tests.py")
+        )
+
+    def is_test_node(self, node: "Node") -> bool:
+        """节点是否属于测试文件。"""
+        return self.is_test_file(node.file)
+
     def get_callers(self, node_id: str) -> list[Node]:
         """获取所有调用方（上游节点）。返回节点列表，边不带权重。"""
         nodes = []
@@ -109,7 +135,8 @@ class GraphIndex:
         """L0 摘要：节点数、边数、Top-N 高入度节点、报错命中节点。"""
         self._log_query("summary")
         nodes = sorted(
-            (n for n in self.graph.nodes.values() if n.node_type.value != "resource"),
+            (n for n in self.graph.nodes.values()
+             if n.node_type.value != "resource" and not self.is_test_node(n)),
             key=lambda n: n.in_degree,
             reverse=True,
         )
@@ -252,6 +279,8 @@ class GraphIndex:
                 if caller.node_id in visited:
                     continue  # 断链，不往后算
                 visited.add(caller.node_id)
+                if self.is_test_node(caller):
+                    continue  # 测试调用不算生产影响面
 
                 in_degree_norm = (
                     caller.in_degree / self.graph.meta.max_in_degree
@@ -286,6 +315,8 @@ class GraphIndex:
                 if caller.node_id in visited:
                     continue
                 visited.add(caller.node_id)
+                if self.is_test_node(caller):
+                    continue  # 测试调用不算生产影响面
                 norm = (caller.in_degree / self.graph.meta.max_in_degree
                         if self.graph.meta.max_in_degree else 0.0)
                 hist = max(1, caller.dynamic_weight)
@@ -388,8 +419,8 @@ class GraphIndex:
                 result.append(n)
         return result
 
-    def _find_node(self, file_path: str, func_name: str) -> Optional[Node]:
-        """按文件+函数名定位节点。"""
+    def find_node(self, file_path: str, func_name: str) -> Optional[Node]:
+        """按文件+函数名定位节点（公开接口，供 view_file 三模式使用）。"""
         candidates = []
         for n in self.graph.nodes.values():
             if n.node_type.value not in ("function", "class"):
@@ -407,3 +438,29 @@ class GraphIndex:
             if c.file == file_path or c.file.endswith(file_path):
                 return c
         return candidates[0]
+
+    def resolve_location(self, file_path: str, lineno: int) -> Optional[Node]:
+        """按文件+行号匹配节点（Phase 2 报错坐标 → 图节点）。
+
+        优先级：行号命中函数体 > 函数/类 > 文件节点。
+        """
+        best = None
+        best_rank = -1
+        base = os.path.basename(file_path)
+        for n in self.graph.nodes.values():
+            if os.path.basename(n.file) != base:
+                continue
+            rank = 0
+            if n.node_type.value in ("function", "class"):
+                rank = 1
+                if lineno and n.lineno <= lineno <= n.end_lineno:
+                    rank = 2
+            if rank <= best_rank:
+                continue
+            best_rank = rank
+            best = n
+        return best
+
+    # 兼容旧名（_find_node 已公开为 find_node）
+    def _find_node(self, file_path: str, func_name: str) -> Optional[Node]:
+        return self.find_node(file_path, func_name)

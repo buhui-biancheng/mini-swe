@@ -18,13 +18,20 @@ class AgentConfig:
 
     # FSM
     rollback_limit: int = 3          # 最大回滚次数
+    check_fail_limit: int = 3        # 连续语法检查失败阈值（触发回滚）
     max_steps: int = 50              # 最大步骤数
     token_budget: int = 100000       # Token 预算
+
+    # 权限围栏（Phase 2 模块 B）
+    fence_penalty: float = 2.0       # 高影响文件的影响面代价惩罚乘数
 
     # 分层加载
     max_l1_neighbors: int = 30       # L1 邻接最大展示数量
     max_l2_neighbors: int = 60       # L2 影响半径最大展示数量
     top_n_in_degree: int = 10        # L0 摘要 Top-N 高入度节点
+
+    # 日志解析器（Phase 2 模块 D）
+    failures_segment_limit: int = 2000  # FAILURES 段截断上限（防上下文膨胀）
 
     # 盲区处理
     max_polymorphism_edges: int = 30  # 多态全笼罩最大边数（防止爆炸）
