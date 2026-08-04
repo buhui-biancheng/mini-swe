@@ -131,3 +131,9 @@ dmypy.json
 
 # 图索引缓存（Phase 1，由 git HEAD 决定是否重建）
 .graph/
+
+# vendored 参考仓库（waku-agent，仅本地借鉴，不随项目提交）
+third_party/
+
+# web 控制台运行时数据（本地私有）
+.swe_agent_web/
