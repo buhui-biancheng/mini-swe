@@ -300,21 +300,42 @@ class AgentFSM:
             )
         parts.append("【图索引 L0 摘要】\n" + "\n".join(lines))
 
-        # 报错文件相关节点的 L1 邻接
+        # 报错文件相关节点 L1 邻接 → 极简格式（位置化读取，省 token）
         bug_base = os.path.basename(self.bug_file)
-        for n in self.graph_index.graph.nodes.values():
-            if n.node_type.value != "function":
-                continue
-            if os.path.basename(n.file) != bug_base:
-                continue
-            neighbors = self.graph_index.get_neighbors(n.node_id, hops=1)
-            nbr_lines = [f"【{n.node_id}】影响面={self.graph_index.compute_impact(n.node_id)}"]
-            for depth, items in neighbors.get("neighbors", {}).items():
-                for it in items:
-                    nbr_lines.append(
-                        f"  [{it['direction']} {it['edge_type']}] {it['node']}"
-                    )
-            parts.append("\n".join(nbr_lines))
+        seed_ids = [
+            n.node_id for n in self.graph_index.graph.nodes.values()
+            if n.node_type.value == "function" and os.path.basename(n.file) == bug_base
+        ]
+        if seed_ids:
+            # 邻域：seed 函数 + 1 跳邻居 + 邻域内边
+            seen = set(seed_ids)
+            for sid in seed_ids:
+                neighbors = self.graph_index.get_neighbors(sid, hops=1)
+                for depth, items in neighbors.get("neighbors", {}).items():
+                    for it in items:
+                        if it.get("node"):
+                            seen.add(it["node"])
+            g = self.graph_index.graph
+            nbr_nodes = sorted(
+                (g.nodes[nid] for nid in seen if nid in g.nodes),
+                key=lambda x: (x.file, x.lineno),
+            )
+            nbr_edges = [e for e in g.edges if e.source in seen and e.target in seen]
+            body = [
+                "# 图索引极简格式：行首 NODE:/EDGE: 区分节点边，字段按 | 分隔固定列序",
+                "# NODE: id | file | function | lineno | in_degree | dynamic_weight | is_reflection",
+                "# EDGE: from | to | edge_type",
+            ]
+            for n in nbr_nodes:
+                body.append(
+                    f"NODE: {n.node_id} | {n.file} | {n.name} | {n.lineno} | "
+                    f"{n.in_degree} | {n.dynamic_weight} | {str(n.is_reflection).lower()}"
+                )
+            for e in nbr_edges:
+                body.append(f"EDGE: {e.source} | {e.target} | {e.edge_type.value}")
+            for sid in seed_ids:
+                body.append(f"# 影响面 {sid} = {self.graph_index.compute_impact(sid)}")
+            parts.append("【图索引邻域（极简格式）】\n" + "\n".join(body))
 
         return "\n\n".join(parts)
 

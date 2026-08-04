@@ -254,6 +254,9 @@ def main():
                        help="导出格式（默认: mermaid）")
     g_viz.add_argument("--output", default="", help="输出文件路径（默认打印到终端）")
 
+    g_compact = graph_sub.add_parser("compact", help="导出极简图格式 graph_compact.grf（AI 位置化读取）")
+    g_compact.add_argument("project_dir", help="项目目录")
+
     # analyze 命令
     analyze_parser = subparsers.add_parser("analyze", help="分析项目 token 统计")
     analyze_parser.add_argument("project_dir", help="项目目录")
@@ -278,13 +281,15 @@ def main():
         )
         sys.exit(0 if success else 1)
     elif args.command == "graph":
-        from swe_agent.cli import graph_build, graph_stats, graph_viz
+        from swe_agent.cli import graph_build, graph_compact, graph_stats, graph_viz
         if args.graph_command == "build":
             graph_build(args.project_dir, force=args.force)
         elif args.graph_command == "stats":
             graph_stats(args.project_dir)
         elif args.graph_command == "viz":
             graph_viz(args.project_dir, format=args.format, output=args.output)
+        elif args.graph_command == "compact":
+            graph_compact(args.project_dir)
         else:
             graph_parser.print_help()
     elif args.command == "analyze":

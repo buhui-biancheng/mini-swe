@@ -177,6 +177,21 @@ class TestAgentFSM:
         assert hasattr(fsm, "patch_done")
         assert hasattr(fsm, "test_pass")
         assert hasattr(fsm, "test_fail")
+
+    def test_graph_context_compact_format(self, sample_bug_project):
+        """图上下文用极简格式：行首 NODE:/EDGE: + 固定列序（位置化读取省 token）。"""
+        bug_file = os.path.join(sample_bug_project, "bug.py")
+        fsm = AgentFSM(bug_file=bug_file, test_command="pytest test_bug.py -v", mode="dp")
+        text = fsm._graph_context_text()
+        assert "极简格式" in text
+        node_lines = [l for l in text.splitlines() if l.startswith("NODE: ")]
+        edge_lines = [l for l in text.splitlines() if l.startswith("EDGE: ")]
+        assert node_lines, "应有 NODE 行"
+        assert edge_lines, "应有 EDGE 行"
+        for line in node_lines:
+            assert len(line.split(" | ")) == 7, f"NODE 应为 7 列: {line!r}"
+        for line in edge_lines:
+            assert len(line.split(" | ")) == 3, f"EDGE 应为 3 列: {line!r}"
         assert hasattr(fsm, "locate_fail")
         assert hasattr(fsm, "patch_fail")
         assert hasattr(fsm, "max_retries")

@@ -7,6 +7,7 @@ import os
 import time
 
 from swe_agent.graph import AgentConfig, GraphManager
+from swe_agent.graph.persistence import save_compact
 
 
 def graph_build(project_dir: str, force: bool = False) -> None:
@@ -80,6 +81,22 @@ def graph_viz(project_dir: str, format: str = "mermaid", output: str = "") -> No
         print(f"[GRAPH] 已导出到 {output}")
     else:
         print(text)
+
+
+def graph_compact(project_dir: str) -> None:
+    """导出极简图格式 graph_compact.grf（AI 位置化读取 + 人类可读调试）。
+
+    格式规范：头部 VERSION/TYPE/SEP 一次性定义；行首 NODE:/EDGE: 区分节点边；
+    字段按固定列序排列，AI 按位置提取无需理解字段名。
+    """
+    project_dir = os.path.abspath(project_dir)
+    mgr = GraphManager(project_dir)
+    idx = mgr.build()
+    g = idx.graph
+    path = save_compact(g, mgr.graph_dir)
+    size = os.path.getsize(path)
+    print(f"[GRAPH] 已导出极简格式: {path}")
+    print(f"  节点 {g.meta.node_count} / 边 {g.meta.edge_count} / {size} 字节")
 
 
 def _safe_id(node_id: str) -> str:

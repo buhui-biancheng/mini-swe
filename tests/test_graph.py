@@ -594,3 +594,56 @@ class TestLLMRetry:
         result = LLMClient._create_with_retry(client, {})
         assert result == {"ok": True}
         assert client.client.chat.completions.create.calls == 2
+
+
+class TestCompactFormat:
+    """极简图格式 graph_compact.grf：AI 位置化读取 + 人类可读调试。"""
+
+    def test_header_and_counts(self, tmp_path):
+        mgr, idx = _build_fixture("call_graph", tmp_path)
+        path = persistence.save_compact(idx.graph, mgr.graph_dir)
+        text = open(path, encoding="utf-8").read()
+        assert text.startswith("VERSION: 1\nTYPE: graph\nSEP: |")
+        assert text.count("NODE: ") == idx.graph.meta.node_count
+        assert text.count("EDGE: ") == idx.graph.meta.edge_count
+
+    def test_node_line_fixed_columns(self, tmp_path):
+        mgr, idx = _build_fixture("call_graph", tmp_path)
+        path = persistence.save_compact(idx.graph, mgr.graph_dir)
+        for line in open(path, encoding="utf-8"):
+            if not line.startswith("NODE: "):
+                continue
+            parts = line[len("NODE: "):].strip().split(" | ")
+            assert len(parts) == 7, f"NODE 应为 7 列: {line!r}"
+            node_id, file, function, lineno, indeg, weight, refl = parts
+            assert node_id in idx.graph.nodes
+            assert file and function
+            assert lineno.isdigit()
+            assert refl in ("true", "false")
+
+    def test_edge_line_fixed_columns(self, tmp_path):
+        mgr, idx = _build_fixture("call_graph", tmp_path)
+        path = persistence.save_compact(idx.graph, mgr.graph_dir)
+        edge_lines = [l for l in open(path, encoding="utf-8") if l.startswith("EDGE: ")]
+        assert edge_lines, "应有 EDGE 行"
+        for line in edge_lines:
+            src, dst, etype = line[len("EDGE: "):].strip().split(" | ")
+            assert len(line.split(" | ")) == 3
+            assert src in idx.graph.nodes
+            assert dst in idx.graph.nodes
+            assert etype in ("call", "data", "import", "inherit", "global", "io")
+
+    def test_separator_isolated(self, tmp_path):
+        """内容中无裸 |（分隔符唯一，按位置分割可靠）。"""
+        mgr, idx = _build_fixture("call_graph", tmp_path)
+        path = persistence.save_compact(idx.graph, mgr.graph_dir)
+        for line in open(path, encoding="utf-8"):
+            if line.startswith("NODE: ") or line.startswith("EDGE: "):
+                body = line.split(": ", 1)[1].strip()
+                expected = 6 if line.startswith("NODE: ") else 2
+                assert body.count("|") == expected, f"分隔符数不符: {line!r}"
+
+    def test_reflection_flag_serialized(self, tmp_path):
+        mgr, idx = _build_fixture("reflection", tmp_path)
+        path = persistence.save_compact(idx.graph, mgr.graph_dir)
+        assert "true" in open(path, encoding="utf-8").read()
