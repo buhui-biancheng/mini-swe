@@ -133,22 +133,44 @@ class GraphManager:
         persistence.save_weights(self._weights, self.graph_dir)
 
     def get_weight(self, node_id: str) -> int:
-        """获取节点动态权重（未加载则自动加载）。"""
+        """获取节点成功计数（未加载则自动加载）。"""
         if not self._weights:
             self.load_weights()
-        return self._weights.get(node_id, 0)
+        return self._weights.get(node_id, {}).get("success", 0)
+
+    def get_fail_count(self, node_id: str) -> int:
+        """获取节点失败计数（缺陷3）。"""
+        if not self._weights:
+            self.load_weights()
+        return self._weights.get(node_id, {}).get("fail", 0)
 
     def update_dynamic_weight(self, node_id: str) -> None:
-        """修复成功后，节点动态权重 +1（并持久化）。"""
+        """修复成功后，节点 success_count +1（并持久化）。"""
         if not self._weights:
             self.load_weights()
-        self._weights[node_id] = self._weights.get(node_id, 0) + 1
+        entry = self._weights.get(node_id, {"success": 0, "fail": 0})
+        entry["success"] = entry.get("success", 0) + 1
+        self._weights[node_id] = entry
         self.save_weights()
         # 同步到当前图
         if self._index is not None:
             node = self._index.graph.nodes.get(node_id)
             if node:
-                node.dynamic_weight = self._weights[node_id]
+                node.dynamic_weight = entry["success"]
+                node.fail_count = entry.get("fail", 0)
+
+    def record_failure(self, node_id: str) -> None:
+        """修复失败/回滚后，节点 fail_count +1（缺陷3）。"""
+        if not self._weights:
+            self.load_weights()
+        entry = self._weights.get(node_id, {"success": 0, "fail": 0})
+        entry["fail"] = entry.get("fail", 0) + 1
+        self._weights[node_id] = entry
+        self.save_weights()
+        if self._index is not None:
+            node = self._index.graph.nodes.get(node_id)
+            if node:
+                node.fail_count = entry["fail"]
 
     def _merge_weights(self) -> None:
         """把持久化权重合并到当前图节点。"""
@@ -159,7 +181,8 @@ class GraphManager:
         for node_id, w in self._weights.items():
             node = self._index.graph.nodes.get(node_id)
             if node:
-                node.dynamic_weight = w
+                node.dynamic_weight = w.get("success", 0)
+                node.fail_count = w.get("fail", 0)
 
     # ========== 内部 ==========
 

@@ -37,13 +37,20 @@ class PermissionFence:
         self._build()
 
     def _build(self) -> None:
-        """确定性规则生成高影响文件集合。"""
+        """确定性规则生成高影响文件集合。
+
+        缺陷4（2026-08-05）：阈值从写死常数改为图入度分布 P95 分位数，
+        小项目大项目都自动适配；同时保留 max(下限) 语义防止过小项目全部命中。
+        """
         file_risk: dict[str, int] = {}
         for n in self.graph_index.graph.nodes.values():
             if n.node_type in (NodeType.FUNCTION, NodeType.CLASS):
                 file_risk[n.file] = file_risk.get(n.file, 0) + n.in_degree
+        # 自适应阈值：max(配置下限, P95 分位数)
+        p95 = self.graph_index.in_degree_percentile(95.0)
+        threshold = max(float(self.config.in_degree_threshold) * 0.5, p95)
         for file_path, risk in file_risk.items():
-            if risk > self.config.in_degree_threshold:
+            if risk >= threshold:
                 self._high_risk_files.add(file_path)
         # 核心目录保护（路径中任一目录段为 core）
         for file_path in self.graph_index.graph.nodes:

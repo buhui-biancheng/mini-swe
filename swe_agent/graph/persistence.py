@@ -48,25 +48,34 @@ def load_graph(graph_dir: str) -> Optional[GraphData]:
         return None
 
 
-def save_weights(weights: dict[str, int], graph_dir: str) -> str:
-    """保存 graph_weights.json。"""
+def save_weights(weights: dict[str, dict], graph_dir: str) -> str:
+    """保存 graph_weights.json（v2：{node_id: {"success": n, "fail": m}}）。"""
     os.makedirs(graph_dir, exist_ok=True)
     path = _resolve_path(graph_dir, WEIGHTS_FILENAME)
-    payload = {"version": 1, "weights": weights}
+    payload = {"version": 2, "weights": weights}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     return path
 
 
-def load_weights(graph_dir: str) -> dict[str, int]:
-    """加载 graph_weights.json，不存在返回空字典。"""
+def load_weights(graph_dir: str) -> dict[str, dict]:
+    """加载 graph_weights.json（兼容 v1 int 格式 → v2 dict）。"""
     path = _resolve_path(graph_dir, WEIGHTS_FILENAME)
     if not os.path.exists(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return dict(data.get("weights", {}))
+        raw = data.get("weights", {})
+        # v1 兼容：int → {"success": n, "fail": 0}
+        weights = {}
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                weights[k] = {"success": int(v.get("success", 0)),
+                              "fail": int(v.get("fail", 0))}
+            else:
+                weights[k] = {"success": int(v), "fail": 0}
+        return weights
     except Exception:
         return {}
 

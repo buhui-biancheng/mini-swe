@@ -13,8 +13,8 @@ class AgentConfig:
     # 影响面计算
     max_hops: int = 5                # 影响面最大跳数
     decay: float = 0.5               # 距离衰减因子
-    impact_threshold: int = 100      # 影响面熔断阈值
-    in_degree_threshold: int = 100   # 高入度节点阈值（用于围栏标记）
+    impact_threshold: int = 100      # 影响面熔断阈值下限（自适应：max(下限, node_count×0.01)，见 adaptive_impact_threshold）
+    in_degree_threshold: int = 100   # 高入度节点阈值下限（缺陷4：实际阈值 = max(下限×0.5, 图入度 P95 分位数)）
 
     # FSM
     rollback_limit: int = 3          # 最大回滚次数

@@ -170,6 +170,7 @@ class AgentFSM:
         python_version: str = "3.11",
         packages: list[str] | None = None,
         mode: str = "auto",
+        no_degrade: bool = False,
     ):
         """初始化 Agent FSM。
 
@@ -189,6 +190,7 @@ class AgentFSM:
         self.code_dir = os.path.dirname(self.bug_file)
         self.mode = mode if mode in ("dp", "greedy", "auto") else "auto"
         self.effective_mode = "greedy" if mode == "greedy" else "dp"
+        self.no_degrade = no_degrade  # 评测消融：禁止 DP→Greedy 降级（2026-08-05）
 
         # 核心组件（图索引）
         self.agent_config = AgentConfig()
@@ -273,6 +275,15 @@ class AgentFSM:
         """重建 system 提示词（不 append 进 conversation，每轮从零拼）。
 
         system 只含当前相关的提示词块，token 开销固定、不随轮数累积。
+
+        稳定头部约束（缺陷8，2026-08-05）：
+            DeepSeek cache-hit 比 miss 便宜 120x，而缓存按前缀命中。
+            头部 = system（base.md 永远第一）+ 初始任务消息（_initial_task_msg，
+            含 L-1/L0/L1 图上下文，只在 INIT 注入一次）——这两块在任务期间
+            **必须保持不变**，每轮只变中部（轮次对话），才能每轮 cache-hit。
+            禁止：把图上下文改成每轮注入 / 调整 base.md 顺序 / 头部拼动态内容。
+            例外：降级时 _plain_task_msg 重置是有意的换策略（次数 ≤ rollback_limit，
+            符合"少而深不渐进"）。
         """
         system = self.prompt_manager.build_system(
             state=self.state,
@@ -284,8 +295,11 @@ class AgentFSM:
         return [{"role": "system", "content": system}] + self.messages
 
     def _graph_context_text(self) -> str:
-        """DP 模式：生成图索引上下文文本（L0 摘要 + 报错节点邻接）。"""
+        """DP 模式：生成图索引上下文文本（L-1 文件级先验 + L0 摘要 + 报错节点邻接）。"""
         parts = []
+
+        # L-1 文件级全局先验（在 L0 之前，最优先注入；数据全部现成，聚合视图）
+        parts.append(self._file_level_prior_text())
 
         # L0 摘要
         summary = self.graph_index.get_summary()
@@ -338,6 +352,10 @@ class AgentFSM:
             parts.append("【图索引邻域（极简格式）】\n" + "\n".join(body))
 
         return "\n\n".join(parts)
+
+    def _file_level_prior_text(self) -> str:
+        """L-1 文件级先验：委托 GraphIndex（2026-08-05 重构，diagnose 共用）。"""
+        return self.graph_index.file_level_prior_text()
 
     def _fence_warnings(self) -> list[str]:
         """本次编辑涉及的围栏警告（软约束）。"""
@@ -826,6 +844,17 @@ class AgentFSM:
         return "\n".join(lines)
 
     def _on_enter_rollback(self) -> None:
+        # 缺陷3：回滚 = 失败一次，记录 fail_count（图不被假成功污染）
+        try:
+            for fp, _, _ in self._edited_ranges:
+                base = os.path.basename(fp)
+                for n in self.graph_index.graph.nodes.values():
+                    if n.node_type.value == "function" and os.path.basename(n.file) == base:
+                        self.graph_manager.record_failure(n.node_id)
+                        break
+        except Exception:
+            pass
+
         """ROLLBACK 状态：代价熔断，恢复初始快照 + 重置规划路径。"""
         self._log_state_enter("rollback", self.attempt)
 
@@ -865,7 +894,16 @@ class AgentFSM:
             self.rollback_fail()  # → fail
 
     def _switch_mode(self, new_mode: str, reason: str) -> None:
-        """DP ↔ Greedy 模式切换（记录 mode_switched 日志）。"""
+        """DP ↔ Greedy 模式切换（记录 mode_switched 日志）。
+
+        评测消融（2026-08-05）：no_degrade=True 时禁止降级，
+        保证消融对比"唯一变量是图信息"（dp-无图 vs dp 都固定不降级）。
+        """
+        if self.no_degrade and new_mode == "greedy" and reason != "token_budget_exceeded":
+            # 不降级：当作失败处理（回滚计数到上限即失败）
+            print(f"[MODE] no_degrade 禁止降级（{reason}），按失败处理")
+            self.rollback_fail()
+            return
         old = self.effective_mode
         self.effective_mode = new_mode
         self.logger.mode_switched(old, new_mode, reason)

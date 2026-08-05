@@ -385,9 +385,15 @@ class TestPersistence:
 
     def test_weights_roundtrip(self, tmp_path):
         graph_dir = str(tmp_path / "w")
-        persistence.save_weights({"a.py::f": 3}, graph_dir)
+        persistence.save_weights({"a.py::f": {"success": 3, "fail": 1}}, graph_dir)
         weights = persistence.load_weights(graph_dir)
-        assert weights == {"a.py::f": 3}
+        assert weights == {"a.py::f": {"success": 3, "fail": 1}}
+        # v1 兼容：int → {"success": n, "fail": 0}
+        v1_path = str(tmp_path / "v1")
+        os.makedirs(v1_path, exist_ok=True)
+        with open(os.path.join(v1_path, "graph_weights.json"), "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "weights": {"a.py::f": 2}}, f)
+        assert persistence.load_weights(v1_path) == {"a.py::f": {"success": 2, "fail": 0}}
         # 不存在时返回空
         assert persistence.load_weights(str(tmp_path / "missing")) == {}
 

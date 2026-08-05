@@ -47,13 +47,17 @@ class PromptManager:
     ) -> str:
         """按当前状态/事件组装 system 提示词。
 
+        稳定头部约束（缺陷8，2026-08-05）：base.md 必须永远第一个 append，
+        顺序不可变——它是缓存前缀的锚点（DeepSeek cache-hit 便宜 120x）。
+        状态/事件提示词只追加在 base 之后，且同一状态内内容必须确定（无随机/时间戳）。
+
         Args:
             state: 当前 FSM 状态
             mode: 当前模式（dp / greedy）
             last_test_failed: 上一轮测试是否失败（注入错误定位协议）
             rollback_notice: 是否刚发生回滚（注入回退认知上下文）
         """
-        parts = [self.load("base.md")]
+        parts = [self.load("base.md")]  # 稳定头部锚点：永远第一，勿动
 
         # 第 2 层：状态提示词
         fname = self._STATE_PROMPTS.get(state)

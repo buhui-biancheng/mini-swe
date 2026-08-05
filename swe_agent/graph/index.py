@@ -15,7 +15,7 @@ from collections import deque
 from typing import Optional
 
 from .config import AgentConfig
-from .models import Edge, EdgeType, GraphData, Node
+from .models import Edge, EdgeType, GraphData, Node, NodeType
 
 # 影响面遍历包含的边类型（导入边/IO 边不算调用语义）
 _TRAVERSAL_EDGE_TYPES = {
@@ -68,6 +68,83 @@ class GraphIndex:
     def get_node(self, node_id: str) -> Optional[Node]:
         """获取单个节点。"""
         return self.graph.nodes.get(node_id)
+
+    def in_degree_percentile(self, p: float = 95.0) -> float:
+        """入度分布 p 分位数（缺陷4：阈值按图规模自适应，替代写死常数）。
+
+        收集所有函数/类节点入度，返回排序后 p 百分位处的值；
+        空图返回 0。小项目（P95≈最大值）和大项目（P95 是结构枢纽线）都自动适配。
+        """
+        values = sorted(
+            n.in_degree for n in self.graph.nodes.values()
+            if n.node_type in (NodeType.FUNCTION, NodeType.CLASS)
+        )
+        if not values:
+            return 0.0
+        k = (len(values) - 1) * (p / 100.0)
+        lo = int(k)
+        hi = min(lo + 1, len(values) - 1)
+        frac = k - lo
+        return values[lo] * (1.0 - frac) + values[hi] * frac
+
+    def file_level_prior_text(self) -> str:
+        """L-1 文件级全局先验：代码库结构地图（文件|函数数|入度|枢纽）+ 文件间调用。
+
+        数据全部来自图（file 字段 + import/call 边 + 入度 + is_test_file），
+        不新增存储；文件级是注入时的聚合视图，函数级图保留作查询索引。
+        列函数名规则：总函数名 ≤50 全列；超过只保留测试文件 + 枢纽文件的函数名。
+        （2026-08-05：从 AgentFSM 重构至此，FSM 与 diagnose 共用同一份数据）
+        """
+        g = self.graph
+        nodes = list(g.nodes.values())
+        edges = list(g.edges)
+
+        file_funcs: dict = {}
+        for n in nodes:
+            if n.node_type.value == "function":
+                file_funcs.setdefault(n.file, []).append(n)
+        if not file_funcs:
+            return "【图索引 L-1 文件级先验】（无函数节点）"
+
+        file_in_degree = {f: sum(x.in_degree for x in funcs) for f, funcs in file_funcs.items()}
+        file_func_count = {f: len(funcs) for f, funcs in file_funcs.items()}
+
+        threshold = float(self.config.adaptive_impact_threshold(len(nodes)))
+        hub_files = {f for f, d in file_in_degree.items() if d >= threshold}
+
+        total_funcs = sum(file_func_count.values())
+        list_all = total_funcs <= 50
+
+        lines = ["# 代码库结构（文件级先验）: 文件 | 函数数 | 入度"]
+        for f in sorted(file_funcs.keys()):
+            cnt = file_func_count[f]
+            deg = file_in_degree[f]
+            is_hub = f in hub_files
+            is_test = self.is_test_file(f)
+            tag = " [枢纽]" if is_hub else ""
+            test_tag = " ← 测试锚点" if is_test else ""
+            func_names = ""
+            if list_all or is_hub or is_test:
+                func_names = f" → {', '.join(x.name for x in file_funcs[f])}"
+            lines.append(f"#   {f}: {cnt} 函数, 入度 {deg}{tag}{func_names}{test_tag}")
+
+        file_edges: dict = {}
+        for e in edges:
+            src = g.nodes.get(e.source)
+            tgt = g.nodes.get(e.target)
+            if src is None or tgt is None:
+                continue
+            if src.file == tgt.file:
+                continue
+            if e.edge_type.value in ("import", "call", "data", "global"):
+                file_edges.setdefault(src.file, set()).add(tgt.file)
+        if file_edges:
+            lines.append("# 文件间调用/导入:")
+            for f in sorted(file_edges.keys()):
+                targets = " / ".join(sorted(file_edges[f]))
+                lines.append(f"#   {f} → {targets}")
+
+        return "【图索引 L-1 文件级先验】\n" + "\n".join(lines)
 
     def is_test_file(self, file_path: str) -> bool:
         """确定性识别测试文件（不依赖命名规范外的任何假设）。

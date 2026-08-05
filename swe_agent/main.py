@@ -237,6 +237,16 @@ def main():
     fix_parser.add_argument("--mode", choices=["dp", "greedy", "auto"], default=None,
                             help="运行模式：dp=图索引引导 / greedy=无图探索 / auto=自动。指定 --mode 时自动启用 FSM")
 
+    # diagnose 命令（Phase 7 模块 B）
+    diag_parser = subparsers.add_parser("diagnose", help="从自然语言 Issue 定位 bug 候选")
+    diag_parser.add_argument("issue", help="Issue 描述（自然语言）")
+    diag_parser.add_argument("--project", required=True, help="项目目录")
+
+    # fix-intent 命令（Phase 7 模块 F：意图路由）
+    fi_parser = subparsers.add_parser("fix-intent", help="自然语言意图路由：判断并触发修复")
+    fi_parser.add_argument("input", help="用户输入（自然语言）")
+    fi_parser.add_argument("--project", required=True, help="项目目录")
+
     # graph 命令（Phase 1 新增）
     graph_parser = subparsers.add_parser("graph", help="加权图索引操作")
     graph_sub = graph_parser.add_subparsers(dest="graph_command", help="图操作")
@@ -280,6 +290,32 @@ def main():
             mode=mode,
         )
         sys.exit(0 if success else 1)
+    elif args.command == "fix-intent":
+        from swe_agent.diagnose import IntentRouter
+        router = IntentRouter(verbose=True)
+        result = router.route(args.input, args.project)
+        if result is None:
+            print("\n[ROUTE] 非修复请求，未触发 FSM")
+            sys.exit(0)
+        if result.success:
+            print(f"\n[ROUTE] 修复成功: {result.final_message}")
+            sys.exit(0)
+        else:
+            print(f"\n[ROUTE] 修复未完成: {result.final_message}")
+            sys.exit(1)
+    elif args.command == "diagnose":
+        from swe_agent.diagnose import DiagnoseAgent
+        from swe_agent.llm.client import LLMClient
+        agent = DiagnoseAgent(project_dir=args.project, verbose=True)
+        agent.llm_client = LLMClient()
+        result = agent.diagnose(args.issue)
+        best = result.best()
+        if best:
+            print(f"\n[DIAGNOSE] 最佳候选: {best.file}")
+            sys.exit(0)
+        else:
+            print("\n[DIAGNOSE] 未定位到候选")
+            sys.exit(1)
     elif args.command == "graph":
         from swe_agent.cli import graph_build, graph_compact, graph_stats, graph_viz
         if args.graph_command == "build":

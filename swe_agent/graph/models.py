@@ -42,7 +42,8 @@ class Node(BaseModel):
     lineno: int = 0
     end_lineno: int = 0
     in_degree: int = 0            # 入度：AST 静态统计
-    dynamic_weight: int = 0       # 动态权重：成功修改次数（持久化）
+    dynamic_weight: int = 0       # 动态权重：成功修改次数（持久化，v2 拆分为 success 计数）
+    fail_count: int = 0           # 失败计数：修复失败/回滚次数（缺陷3，2026-08-05）
     is_reflection: bool = False   # 是否包含反射调用
 
 
