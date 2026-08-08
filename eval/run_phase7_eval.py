@@ -47,9 +47,20 @@ def extract_gold_files(patch: str) -> list[str]:
     return files
 
 
+def parse_ftp(instance: dict) -> list[str]:
+    """FAIL_TO_PASS 可能是字符串（SWE-bench json）或 list。"""
+    raw = instance.get("FAIL_TO_PASS", [])
+    if isinstance(raw, str):
+        try:
+            return eval(raw)
+        except Exception:
+            return [raw]
+    return list(raw)
+
+
 def extract_test_command(instance: dict, gold_files: list[str]) -> str:
     """构造测试命令（FAIL_TO_PASS 优先，其次按测试文件）。"""
-    fail_to_pass = instance.get("FAIL_TO_PASS", [])
+    fail_to_pass = parse_ftp(instance)
     if fail_to_pass:
         return "python3 -m pytest " + " ".join(fail_to_pass) + " -q"
     test_patch = instance.get("test_patch", "")

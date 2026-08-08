@@ -1,0 +1,59 @@
+[
+ {
+  "success": true,
+  "attempts": 5,
+  "duration": 300.4,
+  "mode": "dp",
+  "no_degrade": true,
+  "token_total": 664582,
+  "tool_calls": 30,
+  "graph_level": 0,
+  "p2p_pass": true,
+  "p2p_detail": "",
+  "cost_yuan": 0.1104,
+  "cost_detail": {
+   "prompt": 626778,
+   "completion": 37804,
+   "cached": 604032
+  },
+  "instance_id": "pallets__flask-5063"
+ },
+ {
+  "success": true,
+  "attempts": 1,
+  "duration": 67.0,
+  "mode": "dp",
+  "no_degrade": true,
+  "token_total": 296578,
+  "tool_calls": 17,
+  "graph_level": 1,
+  "p2p_pass": true,
+  "p2p_detail": "",
+  "cost_yuan": 0.0468,
+  "cost_detail": {
+   "prompt": 288946,
+   "completion": 7632,
+   "cached": 262656
+  },
+  "instance_id": "pallets__flask-5063"
+ },
+ {
+  "success": true,
+  "attempts": 1,
+  "duration": 43.3,
+  "mode": "dp",
+  "no_degrade": true,
+  "token_total": 453882,
+  "tool_calls": 12,
+  "graph_level": 2,
+  "p2p_pass": true,
+  "p2p_detail": "",
+  "cost_yuan": 0.0403,
+  "cost_detail": {
+   "prompt": 451002,
+   "completion": 2880,
+   "cached": 424960
+  },
+  "instance_id": "pallets__flask-5063"
+ }
+]
