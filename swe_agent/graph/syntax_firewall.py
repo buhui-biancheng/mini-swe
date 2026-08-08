@@ -35,7 +35,15 @@ class SyntaxCheckResult:
 
 
 class SyntaxFirewall:
-    """静态语法防火墙。"""
+    """静态语法防火墙。
+
+    feature_version：目标环境 Python 版本（如 (3, 8)）——用 ast.parse 的
+    feature_version 参数拦截目标环境不支持的语法（如 match 在 3.10+）。
+    2026-08-08：评测容器 py3.8 时，本地 3.12 语法检查会放行 3.9+ 语法 → 容器爆。
+    """
+
+    def __init__(self, feature_version: Optional[tuple] = None):
+        self.feature_version = feature_version
 
     def check_code(self, code: str, filename: str = "<patch>") -> SyntaxCheckResult:
         """对整段代码做语法检查。
@@ -48,7 +56,10 @@ class SyntaxFirewall:
             SyntaxCheckResult：ok=False 时 errors 含精确行号
         """
         try:
-            ast.parse(code, filename=filename)
+            if self.feature_version:
+                ast.parse(code, filename=filename, feature_version=self.feature_version)
+            else:
+                ast.parse(code, filename=filename)
             return SyntaxCheckResult(ok=True, errors=[])
         except SyntaxError as e:
             return SyntaxCheckResult(ok=False, errors=[

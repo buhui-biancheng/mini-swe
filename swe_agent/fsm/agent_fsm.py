@@ -245,7 +245,16 @@ class AgentFSM:
         self._initial_weights: dict = {}
         self._last_silent_errors: list = []
         self._cognition_history: list = []  # Phase 4 机制二：修改历史（认知保持）
-        self.syntax_firewall = SyntaxFirewall()
+        # 语法检查版本 = 目标容器 Python 版本（评测 py3.8 时拦截 3.9+ 语法）
+        _fv = None
+        if self.python_version:
+            try:
+                _parts = [int(x) for x in str(self.python_version).split(".")[:2]]
+                if len(_parts) == 2:
+                    _fv = tuple(_parts)
+            except ValueError:
+                _fv = None
+        self.syntax_firewall = SyntaxFirewall(feature_version=_fv)
         self._syntax_errors: list = []
 
         # 状态机
