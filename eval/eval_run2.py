@@ -48,7 +48,7 @@ def make_worktree(inst):
     return work
 
 
-def run_one(inst, work, mode, no_degrade, graph_enabled=True):
+def run_one(inst, work, mode, no_degrade, graph_level=2):
     repo = inst["repo"]
     gold_files = [f for f in inst["patch"].split("diff --git a/")[1:]]
     first = gold_files[0].split(" ")[0]
@@ -64,7 +64,7 @@ def run_one(inst, work, mode, no_degrade, graph_enabled=True):
                    code_dir=work,  # 2026-08-08：容器挂载项目根（bug 在子目录也能跑根目录测试）
                    max_retries=2, mode=mode, no_degrade=no_degrade,
                    python_version="3.8", packages=REPO_DEPS[repo],
-                   config=cfg, graph_enabled=graph_enabled)
+                   config=cfg, graph_level=graph_level)
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)
@@ -75,7 +75,7 @@ def run_one(inst, work, mode, no_degrade, graph_enabled=True):
     return {"success": success, "attempts": fsm.attempt + 1,
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
-            "graph_enabled": graph_enabled}
+            "graph_level": graph_level}
 
 
 def main():
@@ -92,13 +92,15 @@ def main():
             print(f"[FAIL] {iid} worktree 重建失败")
             continue
         print(f"\n===== {iid} =====", flush=True)
-        # 评测定稿三组（2026-08-08 修正：消融变量 = 图信息，不是降级开关）
-        # greedy(无图) / dp-无图(禁降级) / dp(禁降级)；dp(允许降级) 为产品对比补充组
-        for mode, nd, ge in [("greedy", True, True), ("dp", True, False), ("dp", True, True)]:
+        # 评测定稿三组（2026-08-08 用户定稿：显微镜粗准/细准消融）
+        # level=0 纯贪心（无任何图信息）/ level=1 只有细准（L1 函数级，无文件级先验）
+        # / level=2 完整（粗准 L-1+L0+骨架 + 细准 L1+影响面标注）
+        # 三组同框架（dp、禁降级），唯一变量 = 图信息层级
+        for mode, nd, lv in [("dp", True, 0), ("dp", True, 1), ("dp", True, 2)]:
             label = f"{mode}{'-无图' if nd and mode=='dp' else ''}{'(允许降级)' if not nd and mode=='dp' else ''}"
             print(f"--- {label} ---", flush=True)
             try:
-                r = run_one(inst, work, mode, nd, ge)
+                r = run_one(inst, work, mode, nd, lv)
                 print(f"  结果: {'✅ 成功' if r['success'] else '❌ 失败'} 尝试={r['attempts']} 耗时={r['duration']}s", flush=True)
                 r["instance_id"] = iid
                 results.append(r)

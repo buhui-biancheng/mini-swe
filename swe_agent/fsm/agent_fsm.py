@@ -175,7 +175,7 @@ class AgentFSM:
         no_degrade: bool = False,
         sandbox: bool = False,
         config=None,
-        graph_enabled: bool = True,
+        graph_level: int = 2,
     ):
         """初始化 Agent FSM。
 
@@ -198,7 +198,10 @@ class AgentFSM:
         # Phase 6 两层沙盒：真实代码只读，Agent 在 COW 副本工作
         self.sandbox = sandbox
         self._l1 = None
-        self.graph_enabled = graph_enabled  # 评测消融：dp-无图 关闭图注入（2026-08-08）
+        # 评测消融（2026-08-08 用户定稿）：graph_level 显微镜粗准/细准
+        #   0 = 纯贪心（无任何图信息）；1 = 只有细准（L1 函数级，无文件级先验）
+        #   2 = 完整（粗准 L-1/L0/骨架 + 细准 L1/影响面标注）
+        self.graph_level = graph_level
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
             real_dir = self.code_dir
@@ -221,9 +224,9 @@ class AgentFSM:
 
         self.graph_manager = GraphManager(self.code_dir, config=self.agent_config)
         self.graph_index = self.graph_manager.build()
-        # 评测消融：dp-无图 时骨架（图信息）也为空
+        # 评测消融：骨架 = 粗准（文件级），graph_level >= 2 才有
         self.skeleton_text = (self.graph_index.generate_skeleton_text()
-                              if self.graph_enabled else "")
+                              if self.graph_level >= 2 else "")
 
         # Phase 2：权限围栏 + 提示词分级 + TokenBudget
         self.fence = PermissionFence(self.graph_index, self.agent_config)
@@ -334,15 +337,17 @@ class AgentFSM:
         return [{"role": "system", "content": system}] + self.messages
 
     def _graph_context_text(self) -> str:
-        if not self.graph_enabled:
+        if self.graph_level == 0:
             return ""
         """DP 模式：生成图索引上下文文本（L-1 文件级先验 + L0 摘要 + 报错节点邻接）。"""
         parts = []
 
         # L-1 文件级全局先验（在 L0 之前，最优先注入；数据全部现成，聚合视图）
-        parts.append(self._file_level_prior_text())
+        # 粗准（大地图）：graph_level >= 2 才有
+        if self.graph_level >= 2:
+            parts.append(self._file_level_prior_text())
 
-        # L0 摘要
+        # L0 摘要（粗准：图级概览）
         summary = self.graph_index.get_summary()
         lines = [
             f"节点数: {summary['node_count']}, 边数: {summary['edge_count']}, "
@@ -353,9 +358,17 @@ class AgentFSM:
             lines.append(
                 f"  - {item['node']} (in_degree={item['in_degree']})"
             )
-        parts.append("【图索引 L0 摘要】\n" + "\n".join(lines))
+        if self.graph_level >= 2:
+            parts.append("【图索引 L0 摘要】\n" + "\n".join(lines))
 
         # 报错文件相关节点 L1 邻接 → 极简格式（位置化读取，省 token）
+        # 细准（小地图）：graph_level >= 1 就有（单独细准也能用）
+        if self.graph_level >= 1:
+            self._append_l1_neighborhood(parts)
+        return "\n\n".join(parts)
+
+    def _append_l1_neighborhood(self, parts) -> None:
+        """L1 邻域极简格式（细准：函数级邻居/边/影响面）。"""
         bug_base = os.path.basename(self.bug_file)
         seed_ids = [
             n.node_id for n in self.graph_index.graph.nodes.values()
@@ -395,7 +408,7 @@ class AgentFSM:
         return "\n\n".join(parts)
 
     def _file_level_prior_text(self) -> str:
-        if not self.graph_enabled:
+        if self.graph_level < 2:
             return ""
         """L-1 文件级先验：委托 GraphIndex（2026-08-05 重构，diagnose 共用）。"""
         return self.graph_index.file_level_prior_text()
@@ -819,7 +832,7 @@ class AgentFSM:
         模块 A 升级：对影响面最大的错误节点注入 L1 邻接（图引导跨文件追踪）。
         """
         _head = ("【测试失败】测试未通过，以下是结构化错误信息（已按图影响面排序）："
-                 if self.graph_enabled
+                 if self.graph_level >= 1
                  else "【测试失败】测试未通过，以下是结构化错误信息：")
         lines = [_head]
         enriched = []
@@ -827,13 +840,13 @@ class AgentFSM:
             top_node, impact = self._error_impact_representative(e)
             enriched.append((e, top_node, impact))
         # 影响面降序（匹配不到图节点的放最后）；图先验消融：无图时不排序（保持原始错误顺序）
-        if self.graph_enabled:
+        if self.graph_level >= 1:
             enriched.sort(key=lambda x: x[2] if x[2] is not None else -1.0, reverse=True)
 
         if enriched:
             for i, (e, node, impact) in enumerate(enriched):
                 loc = f"{e.file}:{e.lineno}" if e.file else "(无法解析位置)"
-                if self.graph_enabled and impact is not None:
+                if self.graph_level >= 1 and impact is not None:
                     impact_str = f"影响面={impact:.4f}"
                     mark = " ← 影响面最大，优先定位" if i == 0 else ""
                     lines.append(f"- {e.error_type} @ {loc} [{impact_str}]{mark}")
