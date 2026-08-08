@@ -178,6 +178,7 @@ class AgentFSM:
         graph_level: int = 2,
         early_stop: bool = False,
         early_stop_patience: int = 2,
+        early_stop_min_attempts: int = 3,
     ):
         """初始化 Agent FSM。
 
@@ -207,6 +208,8 @@ class AgentFSM:
         # 收益早停（2026-08-08）：每次尝试后记录失败用例数，连续无进展则提前停
         self.early_stop = early_stop
         self.early_stop_patience = max(1, early_stop_patience)
+        # 免死期：前 N 次尝试不触发早停（给积累期，2026-08-08 三修①）
+        self.early_stop_min_attempts = max(1, early_stop_min_attempts)
         self.attempt_trajectory = []  # [{attempt, fail_count, token, cost}] 尝试轨迹
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
@@ -822,20 +825,33 @@ class AgentFSM:
                 self.rollback()  # test → rollback
                 return
 
-            # 收益早停（2026-08-08）：失败用例数连续无进展 → 提前停
+            # 收益早停（2026-08-08 三修）：免死期 + 错误签名变化=进展 + 降级而非停止
+            fail_sig = frozenset(
+                f"{e.file}:{e.lineno}:{e.error_type}" for e in parsed.grouped_errors)
             self.attempt_trajectory.append({
                 "attempt": self.attempt,
                 "fail_count": len(parsed.grouped_errors),
+                "fail_signature": fail_sig,
                 "token": self.token_budget.total,
                 "cost": self.token_budget.estimate_cost(),
             })
-            if self.early_stop and len(self.attempt_trajectory) > self.early_stop_patience:
+            if (self.early_stop
+                    and len(self.attempt_trajectory) > self.early_stop_min_attempts
+                    and len(self.attempt_trajectory) > self.early_stop_patience):
                 recent = self.attempt_trajectory[-self.early_stop_patience:]
                 best = min(x["fail_count"] for x in self.attempt_trajectory[:-self.early_stop_patience])
-                if all(x["fail_count"] >= best for x in recent):
+                # 进展 = 失败数严格减少 OR 错误签名变化（不同错误=在探索不同方向）
+                progressed = any(
+                    x["fail_count"] < best or x["fail_signature"] != recent[0]["fail_signature"]
+                    for x in recent)
+                if not progressed:
                     print(f"[EARLY-STOP] 连续 {self.early_stop_patience} 次无进展"
-                          f"（失败数 {[x['fail_count'] for x in recent]} ≥ 历史最佳 {best}），提前停止")
-                    self.retries_exhausted()
+                          f"（失败数 {[x['fail_count'] for x in recent]}，签名未变），降级 Greedy 重试")
+                    # 三修③：降级清上下文重来（最后机会），而非直接判负
+                    self._switch_mode("greedy", reason="early_stop")
+                    self.messages = [{"role": "user", "content": self._plain_task_msg}]
+                    self._rollback_notice = True
+                    self.degrade()  # → locate
                     return
 
             # 影响面 < 阈值 → LOCATE（新起点 = 结构化错误路径，继续修不走原路）

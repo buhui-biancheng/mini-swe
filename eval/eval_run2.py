@@ -110,17 +110,28 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     if success:
         p2p = eval(inst["PASS_TO_PASS"])
         if p2p:
-            # 官方口径：按测试文件跑（逐节点 ID 会被参数化测试的 :: 拆断，如 IPv6 URL）
+            # 2026-08-08 完善：文件级跑 + -v 按节点判定——
+            # 逐节点会被参数化 node ID 的 :: 拆断（IPv6 URL）；文件级跑则含环境噪声测试
+            # （外网/版本差异）。正确做法：文件级跑，只检查 P2P 节点是否 PASSED。
+            import re as _re
             p2p_files = sorted({x.split("::")[0] for x in p2p if x.split("::")[0].endswith(".py")})
             if not p2p_files:
                 p2p_files = [x.split("::")[0] for x in p2p][:5]
             cmd2 = (f"{src_hint}python3 -m pytest " + " ".join(f'"{f}"' for f in p2p_files)
-                    + " -q -p no:cacheprovider")
+                    + " -v --no-header -p no:cacheprovider")
             r2 = run_in_docker(work, cmd2, python_version="3.8",
-                               packages=REPO_DEPS[repo], timeout=600)
-            p2p_pass = r2.exit_code == 0
+                               packages=REPO_DEPS[repo], timeout=900)
+            # 解析 -v 输出：PASSED 的节点集合（路径相对 cwd=/workspace，与 P2P 列表一致）
+            passed_nodes = set()
+            for line in (r2.stdout or "").splitlines():
+                m = _re.match(r"(.+?::.+?) (PASSED|FAILED|ERROR|SKIPPED)", line.strip())
+                if m and m.group(2) == "PASSED":
+                    passed_nodes.add(m.group(1))
+            # P2P 节点全部 PASSED = 无回归；环境噪声节点失败不影响判定
+            p2p_pass = all(n in passed_nodes for n in p2p)
             if not p2p_pass:
-                p2p_detail = (r2.stderr or "")[-300:] + (r2.stdout or "")[-300:]
+                missing = [n for n in p2p if n not in passed_nodes]
+                p2p_detail = f"P2P 未通过节点: {missing[:5]}"
     return {"success": success, "attempts": fsm.attempt + 1,
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
@@ -144,10 +155,10 @@ def main():
             continue
         print(f"\n===== {iid} =====", flush=True)
         # 评测定稿三组（2026-08-08 用户定稿：显微镜粗准/细准消融）
-        # level=0 纯贪心（无任何图信息）/ level=1 只有细准（L1 函数级，无文件级先验）
-        # / level=2 完整（粗准 L-1+L0+骨架 + 细准 L1+影响面标注）
-        # 三组同框架（dp、禁降级），唯一变量 = 图信息层级
-        for mode, nd, lv in [("dp", True, 0), ("dp", True, 1), ("dp", True, 2)]:
+        # level=0 纯贪心 / level=1 只有细准 / level=2 完整；EVAL_LEVELS 环境变量可指定
+        levels_env = os.environ.get("EVAL_LEVELS", "0,1,2")
+        _levels = [int(x) for x in levels_env.split(",") if x.strip() in ("0", "1", "2")]
+        for mode, nd, lv in [("dp", True, l) for l in _levels]:
             label = f"{mode}{'-无图' if nd and mode=='dp' else ''}{'(允许降级)' if not nd and mode=='dp' else ''}"
             print(f"--- {label} ---", flush=True)
             try:
