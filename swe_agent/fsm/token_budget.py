@@ -36,12 +36,15 @@ class TokenBudget:
         pt = int(usage.get("prompt_tokens", 0) or 0)
         ct = int(usage.get("completion_tokens", 0) or 0)
         cached = 0
-        details = usage.get("prompt_tokens_details") or {}
-        # openai 库返回 Pydantic 对象（PromptTokensDetails），也可能 dict
-        if hasattr(details, "cached_tokens"):
-            cached = int(details.cached_tokens or 0)
-        elif isinstance(details, dict):
-            cached = int(details.get("cached_tokens", 0) or 0)
+        # DeepSeek 官方字段（2026-08-08 对照文档）：prompt_cache_hit_tokens 顶层字段
+        cached = int(usage.get("prompt_cache_hit_tokens", 0) or 0)
+        if cached == 0:
+            details = usage.get("prompt_tokens_details") or {}
+            # openai 兼容层：Pydantic 对象或 dict
+            if hasattr(details, "cached_tokens"):
+                cached = int(details.cached_tokens or 0)
+            elif isinstance(details, dict):
+                cached = int(details.get("cached_tokens", 0) or 0)
         self.prompt_total += pt
         self.completion_total += ct
         self.cached_total += cached

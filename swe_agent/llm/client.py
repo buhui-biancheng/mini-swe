@@ -120,8 +120,11 @@ class LLMClient:
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
-                # 缓存命中明细（成本计算前提，2026-08-08）
-                "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None) or {},
+                # DeepSeek 官方缓存字段（2026-08-08 对照官方文档）：
+                # prompt_cache_hit_tokens = 命中上下文缓存的 token 数（顶层字段）
+                # 注：openai 兼容的 prompt_tokens_details.cached_tokens 不填充
+                "prompt_cache_hit_tokens": getattr(response.usage, "prompt_cache_hit_tokens", 0) or 0,
+                "prompt_cache_miss_tokens": getattr(response.usage, "prompt_cache_miss_tokens", 0) or 0,
             }
 
         # DeepSeek thinking 模式返回 reasoning_content，需要传回
@@ -240,7 +243,8 @@ class LLMClient:
                     "prompt_tokens": chunk.usage.prompt_tokens,
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
-                    "prompt_tokens_details": getattr(chunk.usage, "prompt_tokens_details", None) or {},
+                    "prompt_cache_hit_tokens": getattr(chunk.usage, "prompt_cache_hit_tokens", 0) or 0,
+                    "prompt_cache_miss_tokens": getattr(chunk.usage, "prompt_cache_miss_tokens", 0) or 0,
                 }
 
         self._log_request(usage)
