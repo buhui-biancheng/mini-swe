@@ -63,7 +63,8 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                       token_budget=None)  # 用户定稿：评测不设上限（防失控靠 max_retries）
     fsm = AgentFSM(bug_file=bug_file, test_command=test_cmd,
                    code_dir=work,  # 2026-08-08：容器挂载项目根（bug 在子目录也能跑根目录测试）
-                   max_retries=2, mode=mode, no_degrade=no_degrade,
+                   max_retries=6,  # 2026-08-08：难档重测（65 行重写需更多尝试；简单任务 2 次够）
+                   mode=mode, no_degrade=no_degrade,
                    python_version="3.8", packages=REPO_DEPS[repo],
                    config=cfg, graph_level=graph_level)
     start = time.time()
