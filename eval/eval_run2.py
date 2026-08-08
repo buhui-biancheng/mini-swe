@@ -55,7 +55,9 @@ def run_one(inst, work, mode, no_degrade, graph_enabled=True):
     bug_file = os.path.join(work, first)
     ftp = eval(inst["FAIL_TO_PASS"])
     src_hint = "PYTHONPATH=/workspace/src " if os.path.isdir(os.path.join(work, "src")) else ""
-    test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q"
+    # 2026-08-08：-p no:cacheprovider 必须加——容器只读挂载，pytest cache 写失败
+    # 会导致 exit 1（即使测试全过）= 假失败（flask-4045 三组全挂的根因）
+    test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q -p no:cacheprovider"
     cfg = AgentConfig(thinking_enabled=True, reasoning_effort="high",
                       token_budget=None)  # 用户定稿：评测不设上限（防失控靠 max_retries）
     fsm = AgentFSM(bug_file=bug_file, test_command=test_cmd,
