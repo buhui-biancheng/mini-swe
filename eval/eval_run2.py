@@ -28,6 +28,15 @@ REPO_DEPS = {
 PROXY_ENV = dict(os.environ, HTTPS_PROXY="http://10.0.2.2:7897", HTTP_PROXY="http://10.0.2.2:7897")
 
 
+def pytest_dev_patch(work, inst):
+    """pytest-dev 配方（2026-08-08 验证）：手写 _version.py（setuptools_scm 构建产物）。"""
+    import glob
+    pp = glob.glob(os.path.join(work, "_pytest")) + glob.glob(os.path.join(work, "src", "_pytest"))
+    if pp:
+        with open(os.path.join(pp[0], "_version.py"), "w", encoding="utf-8") as f:
+            f.write('version = "8.3.0"\n')
+
+
 def make_worktree(inst):
     iid = inst["instance_id"]
     work = os.path.join(WORK, iid)
@@ -58,7 +67,16 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     src_hint = "PYTHONPATH=/workspace/src " if os.path.isdir(os.path.join(work, "src")) else ""
     # 2026-08-08：-p no:cacheprovider 必须加——容器只读挂载，pytest cache 写失败
     # 会导致 exit 1（即使测试全过）= 假失败（flask-4045 三组全挂的根因）
-    test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q -p no:cacheprovider"
+    # pytest-dev 特殊：源码版自举（-c /dev/null 绕 tox.ini，-p pytester 加载内置插件）
+    if repo == "pytest-dev/pytest":
+        pytest_dev_patch(work, inst)
+        src_hint = ("PYTHONPATH=/workspace/src " if os.path.isdir(os.path.join(work, "src"))
+                    else "PYTHONPATH=/workspace ")
+        test_cmd = (f"cd /workspace && {src_hint}python3 -m pytest "
+                    + " ".join(f'"{t}"' for t in ftp[:6])
+                    + " -q -p no:cacheprovider -c /dev/null -p pytester")
+    else:
+        test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q -p no:cacheprovider"
     cfg = AgentConfig(thinking_enabled=True, reasoning_effort="high",
                       token_budget=None)  # 用户定稿：评测不设上限（防失控靠 max_retries）
     fsm = AgentFSM(bug_file=bug_file, test_command=test_cmd,
