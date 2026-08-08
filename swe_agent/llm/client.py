@@ -120,6 +120,8 @@ class LLMClient:
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                # 缓存命中明细（成本计算前提，2026-08-08）
+                "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None) or {},
             }
 
         # DeepSeek thinking 模式返回 reasoning_content，需要传回
@@ -238,6 +240,7 @@ class LLMClient:
                     "prompt_tokens": chunk.usage.prompt_tokens,
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
+                    "prompt_tokens_details": getattr(chunk.usage, "prompt_tokens_details", None) or {},
                 }
 
         self._log_request(usage)

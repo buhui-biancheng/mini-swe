@@ -45,8 +45,13 @@ class TokenBudget:
         return self.total
 
     def estimate_cost(self, price_in=1.0, price_cached=0.02, price_out=2.0) -> float:
-        """估算成本（元）。默认 DeepSeek 定价：输入未命中 1 元/百万、命中 0.02、输出 2。"""
-        p = (self.prompt_total - self.cached_total) / 1e6 * price_in
+        """估算成本（元）。默认 DeepSeek 定价：输入未命中 1 元/百万、命中 0.02、输出 2。
+
+        注意：价格参数需按官方文档/实测校准（缓存命中价可能随模型变化）；
+        cached 异常（API 未返回或大于 prompt）时按 0 处理，避免负数。
+        """
+        uncached = max(0, self.prompt_total - self.cached_total)
+        p = uncached / 1e6 * price_in
         c = self.cached_total / 1e6 * price_cached
         o = self.completion_total / 1e6 * price_out
         return round(p + c + o, 4)
