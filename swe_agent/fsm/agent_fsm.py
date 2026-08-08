@@ -172,6 +172,7 @@ class AgentFSM:
         packages: list[str] | None = None,
         mode: str = "auto",
         no_degrade: bool = False,
+        sandbox: bool = False,
     ):
         """初始化 Agent FSM。
 
@@ -189,6 +190,19 @@ class AgentFSM:
         self.python_version = python_version
         self.packages = packages or ["pytest"]
         self.code_dir = os.path.dirname(self.bug_file)
+        # Phase 6 两层沙盒：真实代码只读，Agent 在 COW 副本工作
+        self.sandbox = sandbox
+        self._l1 = None
+        if sandbox:
+            from swe_agent.sandbox.l1_sandbox import L1Sandbox
+            real_dir = self.code_dir
+            self._real_dir = real_dir
+            self._l1 = L1Sandbox(real_dir)
+            task_id = f"{os.path.basename(real_dir)}_{os.getpid()}"
+            ws = self._l1.create(task_id=task_id)
+            self.code_dir = ws  # 一切操作指向副本
+            # bug_file 映射到副本（图/快照/编辑全部基于副本）
+            self.bug_file = self._l1.map_to_workspace(self.bug_file)
         self.mode = mode if mode in ("dp", "greedy", "auto") else "auto"
         self.effective_mode = "greedy" if mode == "greedy" else "dp"
         self.no_degrade = no_degrade  # 评测消融：禁止 DP→Greedy 降级（2026-08-05）
@@ -1016,7 +1030,11 @@ class AgentFSM:
             True 表示修复成功，False 表示失败
         """
         self._on_enter_init()
-        return self.state == "success"
+        success = self.state == "success"
+        # Phase 6：任务结束清理工作副本（成功/失败都不留副本）
+        if self.sandbox and self._l1 is not None:
+            self._l1.cleanup()
+        return success
 
 
 def run_fsm_agent(
