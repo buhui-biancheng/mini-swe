@@ -23,11 +23,12 @@ def main():
     print("SWE-bench 层1 评测结果分析")
     print("=" * 70)
 
-    # 按 (mode, graph_enabled) 分组
+    # 按 graph_level 分组（显微镜消融：0=纯贪心 1=只有细准 2=完整）
+    LEVEL_NAMES = {0: "纯贪心(无图)", 1: "只有细准", 2: "完整(粗准+细准)"}
     groups = defaultdict(list)
     for r in results:
-        key = f"{r['mode']}{'-无图' if not r.get('graph_enabled', True) else ''}"
-        groups[key].append(r)
+        lv = r.get("graph_level", 2)
+        groups[f"L{lv} {LEVEL_NAMES.get(lv, '?')}"].append(r)
 
     for gname, items in groups.items():
         succ = sum(1 for r in items if r["success"])
@@ -45,8 +46,9 @@ def main():
     print("\n" + "=" * 70)
     print("明细（每实例每组）")
     for r in results:
-        g = "有图" if r.get("graph_enabled", True) else "无图"
-        print(f"  {r['instance_id'][:30]} {r['mode']}({g}) "
+        lv = r.get("graph_level", 2)
+        g = LEVEL_NAMES.get(lv, f"L{lv}")
+        print(f"  {r['instance_id'][:30]} {g} "
               f"{'✅' if r['success'] else '❌'} {r.get('duration', 0):.0f}s "
               f"tok={r.get('token_total', 0):,} att={r.get('attempts', 0)} tc={r.get('tool_calls', 0)}")
 
