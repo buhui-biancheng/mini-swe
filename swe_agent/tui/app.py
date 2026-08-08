@@ -27,14 +27,15 @@ class ChatApp(App):
         Binding("ctrl+l", "clear", "清空"),
     ]
 
-    def __init__(self):
+    def __init__(self, project_dir: Optional[str] = None):
         super().__init__()
         self.state = AppState()
         self.message_list: Optional[MessageList] = None
         self.status_bar: Optional[StatusBar] = None
         self.command_palette: Optional[CommandPalette] = None
         self.start_time = time.time()
-        self.current_dir = os.getcwd()
+        # 工作目录：--project 指定优先，否则用 cwd（生图只对这个目录向下扫描）
+        self.current_dir = os.path.abspath(project_dir) if project_dir else os.getcwd()
         self.conversation_history: list[dict] = []
         self.thinking_collapsed: bool = True
         self._init_agent()
@@ -50,13 +51,21 @@ class ChatApp(App):
         if self.tool_registry is None:
             from swe_agent.tools.registry import ToolRegistry
             from swe_agent.graph import GraphManager
+            # 首次对话触发建图：只对工作目录（self.current_dir）向下扫描，
+            # 不向上扫上级目录（builder os.walk 以 code_dir 为根）
             graph_mgr = GraphManager(self.current_dir)
             graph_index = graph_mgr.build()
+            summary = graph_index.get_summary()
+            self._add_system(
+                f"已为工作目录建图: {self.current_dir}\n"
+                f"  节点 {summary['node_count']} / 边 {summary['edge_count']} / "
+                f"文件 {summary['file_count']}（只含此目录及子目录）")
             skeleton_text = graph_index.generate_skeleton_text()
             self.tool_registry = ToolRegistry(
                 skeleton_text=skeleton_text,
                 code_dir=self.current_dir,
                 graph_index=graph_index,
+                graph_manager=graph_mgr,
             )
 
     def compose(self) -> ComposeResult:
@@ -564,8 +573,9 @@ class ChatApp(App):
         self._add_system("已取消")
 
 
-def run_tui():
-    app = ChatApp()
+def run_tui(project_dir: Optional[str] = None):
+    """启动 TUI。project_dir 指定工作目录（生图范围），None 用 cwd。"""
+    app = ChatApp(project_dir=project_dir)
     app.run()
 
 

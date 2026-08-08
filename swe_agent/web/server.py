@@ -363,16 +363,13 @@ def _try_bind(port: int):
 def main(project: str | None = None, port: int | None = None) -> None:
     HOME.mkdir(parents=True, exist_ok=True)
     TRACES.mkdir(parents=True, exist_ok=True)
-    if project:
-        ST.project_root = os.path.abspath(project)
-        ST.code_dir = ST.project_root
-    else:
-        try:  # 无 --project 时恢复上次的 code_dir
-            saved = (HOME / "last_project").read_text(encoding="utf-8").strip()
-            if saved and os.path.isdir(saved):
-                ST.code_dir = saved
-        except Exception:
-            pass
+    if not project:
+        # 图生成隔离（2026-08-08）：必须显式指定工作目录，
+        # 禁止用 cwd / last_project 兜底——防止误在上级目录生成大范围图
+        raise SystemExit(
+            "必须指定 --project <工作目录>（图生成隔离：只扫该目录及子目录）")
+    ST.project_root = os.path.abspath(project)
+    ST.code_dir = ST.project_root
     base = port or DEFAULT_PORT
     server = None
     for candidate in range(base, base + 10):  # 端口被占则顺延

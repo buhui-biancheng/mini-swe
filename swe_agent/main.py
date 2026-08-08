@@ -273,6 +273,8 @@ def main():
 
     # tui 命令
     tui_parser = subparsers.add_parser("tui", help="启动 TUI 终端界面")
+    tui_parser.add_argument("--project", required=True,
+                            help="工作目录（必填：图生成隔离，只扫此目录及子目录）")
 
     args = parser.parse_args()
 
@@ -332,7 +334,7 @@ def main():
         analyze_tokens(args.project_dir)
     elif args.command == "tui":
         from swe_agent.tui.app import run_tui
-        run_tui()
+        run_tui(project_dir=args.project)
     else:
         parser.print_help()
 
