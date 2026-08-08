@@ -124,9 +124,10 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
             # 解析 -v 输出：PASSED 的节点集合（路径相对 cwd=/workspace，与 P2P 列表一致）
             passed_nodes = set()
             for line in (r2.stdout or "").splitlines():
-                m = _re.match(r"(.+?::.+?) (PASSED|FAILED|ERROR|SKIPPED)", line.strip())
-                if m and m.group(2) == "PASSED":
-                    passed_nodes.add(m.group(1))
+                # 行尾状态词（rsplit 比正则稳：参数化节点名可含任意字符）
+                ls = line.strip()
+                if ls.endswith(" PASSED"):
+                    passed_nodes.add(ls[: -len(" PASSED")])
             # P2P 节点全部 PASSED = 无回归；环境噪声节点失败不影响判定
             p2p_pass = all(n in passed_nodes for n in p2p)
             if not p2p_pass:
