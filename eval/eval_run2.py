@@ -10,6 +10,7 @@ import shutil
 sys.path.insert(0, "/home/yuanyin292/桌面/xiangmu1")
 
 from swe_agent.fsm.agent_fsm import AgentFSM
+from swe_agent.sandbox.docker_runner import run_in_docker
 from swe_agent.graph.config import AgentConfig
 
 DATA = "/home/yuanyin292/桌面/xiangmu1/eval/swe_bench_data"
@@ -72,10 +73,25 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     # token 消耗 = token_budget.total（整组累计），工具调用数 = tool_call_count
     token_total = getattr(fsm.token_budget, "total", 0)
     tool_calls = getattr(fsm, "tool_call_count", 0)
+    # PASS_TO_PASS 回归验证（官方 harness 口径，2026-08-08）：
+    # FSM 成功（FTP 过）后，再跑 P2P——全过才算官方 resolve；有挂 = 引入回归
+    p2p_pass = None
+    p2p_detail = ""
+    if success:
+        p2p = eval(inst["PASS_TO_PASS"])
+        if p2p:
+            cmd2 = (f"{src_hint}python3 -m pytest " + " ".join(f'"{x}"' for x in p2p[:40])
+                    + " -q -p no:cacheprovider")
+            r2 = run_in_docker(work, cmd2, python_version="3.8",
+                               packages=REPO_DEPS[repo], timeout=600)
+            p2p_pass = r2.exit_code == 0
+            if not p2p_pass:
+                p2p_detail = (r2.stderr or "")[-300:] + (r2.stdout or "")[-300:]
     return {"success": success, "attempts": fsm.attempt + 1,
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
-            "graph_level": graph_level}
+            "graph_level": graph_level, "p2p_pass": p2p_pass,
+            "p2p_detail": p2p_detail}
 
 
 def main():
