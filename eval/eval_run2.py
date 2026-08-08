@@ -68,8 +68,14 @@ def run_one(inst, work, mode, no_degrade, graph_enabled=True):
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)
+    # 效率指标（用户定稿：主指标 = 效率）：
+    # token 消耗 = token_budget.total（整组累计），工具调用数 = tool_call_count
+    token_total = getattr(fsm.token_budget, "total", 0)
+    tool_calls = getattr(fsm, "tool_call_count", 0)
     return {"success": success, "attempts": fsm.attempt + 1,
-            "duration": dur, "mode": mode, "no_degrade": no_degrade}
+            "duration": dur, "mode": mode, "no_degrade": no_degrade,
+            "token_total": token_total, "tool_calls": tool_calls,
+            "graph_enabled": graph_enabled}
 
 
 def main():
