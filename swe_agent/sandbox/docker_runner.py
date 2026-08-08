@@ -4,6 +4,7 @@ import sys
 import hashlib
 import tempfile
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -149,6 +150,7 @@ def run_in_docker(
     packages: list[str] | None = None,
     timeout: int = 60,
     network: bool = False,
+    links: Optional[list] = None,
 ) -> ExecutionResult:
     """在隔离的 Docker 容器中执行命令。
 
@@ -196,6 +198,7 @@ def run_in_docker(
             working_dir="/workspace",
             mem_limit="1g",
             network_disabled=not network,
+            links=[tuple(lnk.split(":", 1)) for lnk in (links or [])] or None,
             read_only=True,
             privileged=False,
             tmpfs={"/tmp": "size=200m"},
