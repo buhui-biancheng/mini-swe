@@ -43,6 +43,8 @@ class _State:
     session = "default"        # 当前会话 id
     code_dir: str | None = None
     project_root: str | None = None
+    thinking_enabled: bool = True   # 思考强度（/api/config 调整）
+    reasoning_effort: str = "high"
 
 
 ST = _State()
@@ -183,6 +185,11 @@ class Handler(BaseHTTPRequestHandler):
             cursor = int(raw) if raw and raw.lstrip("-").isdigit() else None
             self._send(json.dumps(_events_since(cursor), default=str).encode(),
                        "application/json")
+        elif self.path == "/api/config":
+            self._send_json({
+                "thinking_enabled": ST.thinking_enabled,
+                "reasoning_effort": ST.reasoning_effort,
+            })
         elif self.path.startswith("/api/models"):
             self._send(json.dumps({"models": [], "error": ""}).encode(), "application/json")
         elif self.path.startswith("/static/"):
@@ -205,6 +212,21 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST ----
 
     def do_POST(self):
+        # 2026-08-08：更新思考强度配置
+        if self.path == "/api/config":
+            import json as _json
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = _json.loads(self.rfile.read(length).decode("utf-8"))
+                if "thinking_enabled" in body:
+                    ST.thinking_enabled = bool(body["thinking_enabled"])
+                if "reasoning_effort" in body and body["reasoning_effort"] in ("low", "medium", "high", "max"):
+                    ST.reasoning_effort = body["reasoning_effort"]
+                self._send_json({"ok": True, "thinking_enabled": ST.thinking_enabled,
+                                 "reasoning_effort": ST.reasoning_effort})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)})
+            return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
 

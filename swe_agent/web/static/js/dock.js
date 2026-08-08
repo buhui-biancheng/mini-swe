@@ -144,3 +144,34 @@ async function switchTo(provider, model){
   await applyModel({provider, model,
     small_model: provider === st.provider ? st.small_model : ""});
 }
+
+
+/* 思考强度配置（2026-08-08）：页面加载读取 + 控件变更推送到后端 */
+(function () {
+  function syncConfig() {
+    var think = document.getElementById("think-toggle");
+    var effort = document.getElementById("effort-select");
+    if (!think || !effort) return;
+    fetch("/api/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({thinking_enabled: think.checked, reasoning_effort: effort.value})
+    }).catch(function () {});
+  }
+  function loadConfig() {
+    var think = document.getElementById("think-toggle");
+    var effort = document.getElementById("effort-select");
+    if (!think || !effort) return;
+    fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
+      if (cfg.thinking_enabled !== undefined) think.checked = cfg.thinking_enabled;
+      if (cfg.reasoning_effort) effort.value = cfg.reasoning_effort;
+    }).catch(function () {});
+  }
+  document.addEventListener("DOMContentLoaded", function () {
+    var think = document.getElementById("think-toggle");
+    var effort = document.getElementById("effort-select");
+    if (think) think.addEventListener("change", syncConfig);
+    if (effort) effort.addEventListener("change", syncConfig);
+    loadConfig();
+  });
+})();

@@ -37,6 +37,15 @@
     <button class="sessbtn" onclick="toggleSessMenu(event)">History &#9662;</button>
     <button class="sessbtn teletoggle" id="teletoggle" onclick="toggleTele()" title="Show/hide per-turn stats: gate decision, seconds, iterations, tools">stats</button>
     <button class="modelchip" id="modelchip" style="display:none" onclick="toggleModelMenu(event)" title="Switch the model for this chat">&hellip;</button>
+    <label style="font-size:11px;color:#999;margin-left:6px;">思考
+      <input type="checkbox" id="think-toggle" checked title="深度思考模式">
+    </label>
+    <select id="effort-select" style="font-size:11px;margin-left:4px;background:#222;color:#ccc;border:1px solid #444;border-radius:3px;" title="推理强度">
+      <option value="low">low</option>
+      <option value="medium">medium</option>
+      <option value="high" selected>high</option>
+      <option value="max">max</option>
+    </select>
   </div>
   <div class="chatlog" id="docklog"></div>
   <div class="chatbar">

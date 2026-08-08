@@ -173,6 +173,7 @@ class AgentFSM:
         mode: str = "auto",
         no_degrade: bool = False,
         sandbox: bool = False,
+        config=None,
     ):
         """初始化 Agent FSM。
 
@@ -208,7 +209,7 @@ class AgentFSM:
         self.no_degrade = no_degrade  # 评测消融：禁止 DP→Greedy 降级（2026-08-05）
 
         # 核心组件（图索引）
-        self.agent_config = AgentConfig()
+        self.agent_config = config or AgentConfig()  # 可注入（评测/Web 调整思考强度）
         self.client = LLMClient()
         self.logger = AgentLogger()
         self.logger.init(bug_file=self.bug_file, test_command=test_command, mode=self.mode)
@@ -471,6 +472,8 @@ class AgentFSM:
                 tool_executor=tool_executor,
                 max_rounds=10,
                 usage_callback=self._on_usage,
+                thinking=self.agent_config.thinking_enabled,
+                reasoning_effort=self.agent_config.reasoning_effort,
             )
         except AgentAPIError as e:
             print(f"[ERROR] LLM API 持续失败: {e}")

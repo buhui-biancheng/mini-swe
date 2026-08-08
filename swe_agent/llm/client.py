@@ -256,6 +256,8 @@ class LLMClient:
         max_rounds: int = 5,
         max_retries: int = 3,
         usage_callback: Optional[Callable[[dict], None]] = None,
+        thinking: bool = False,
+        reasoning_effort: str = "high",
     ) -> tuple[str, list[dict[str, Any]]]:
         """带工具调用的多轮对话。
 
@@ -273,7 +275,8 @@ class LLMClient:
         conversation = list(messages)
 
         for _ in range(max_rounds):
-            response = self.chat(conversation, tools=tools)
+            response = self.chat(conversation, tools=tools,
+                                  thinking=thinking, reasoning_effort=reasoning_effort)
             if usage_callback is not None:
                 usage_callback(response.usage)
 

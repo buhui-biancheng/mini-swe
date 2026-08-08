@@ -61,7 +61,8 @@ def _mock_chat(fsm, captured=None):
     bucket = [] if captured is None else captured
 
     def fake_chat(messages, tools=None, tool_executor=None,
-                  max_rounds=5, usage_callback=None):
+                  max_rounds=5, usage_callback=None,
+                      thinking=False, reasoning_effort="high"):
         bucket.append(list(messages))
         if usage_callback:
             usage_callback({})

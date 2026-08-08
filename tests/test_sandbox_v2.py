@@ -102,7 +102,8 @@ class TestFsmSandbox:
         )
         # mock chat：直接成功
         def fake_chat(messages, tools=None, tool_executor=None,
-                      max_rounds=5, usage_callback=None):
+                      max_rounds=5, usage_callback=None,
+                      thinking=False, reasoning_effort="high"):
             if usage_callback:
                 usage_callback({})
             return ("done", messages)

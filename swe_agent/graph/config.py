@@ -37,6 +37,10 @@ class AgentConfig:
     max_polymorphism_edges: int = 30  # 多态全笼罩最大边数（防止爆炸）
     max_importlib_candidates: int = 20  # importlib 全笼罩最大候选模块数
 
+    # 思考模式（2026-08-08：DeepSeek V4 thinking + reasoning_effort）
+    thinking_enabled: bool = False      # 是否启用深度思考（评测/复杂任务拉满）
+    reasoning_effort: str = "high"      # 推理强度（low/medium/high/max）
+
     # 文件操作关键字（IO 边识别）
     io_keywords: tuple[str, ...] = (
         "open", "os.open", "os.read", "os.write",

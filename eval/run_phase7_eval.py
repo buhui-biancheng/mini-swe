@@ -63,9 +63,12 @@ def extract_test_command(instance: dict, gold_files: list[str]) -> str:
 def run_layer1(instance: dict, project_root: str, mode: str,
                no_degrade: bool) -> EvalResult:
     from swe_agent.fsm.agent_fsm import AgentFSM
+    from swe_agent.graph.config import AgentConfig
 
     result = EvalResult(instance_id=instance["instance_id"], mode=mode,
                         layer=1, success=False)
+    # 评测：flash + 思考拉满（用户定稿 2026-08-08）
+    eval_config = AgentConfig(thinking_enabled=True, reasoning_effort="high")
     gold_files = extract_gold_files(instance.get("patch", ""))
     if not gold_files:
         result.error = "gold patch 无文件"
@@ -75,7 +78,8 @@ def run_layer1(instance: dict, project_root: str, mode: str,
     start = time.time()
     try:
         fsm = AgentFSM(bug_file=bug_file, test_command=test_cmd,
-                       max_retries=2, mode=mode, no_degrade=no_degrade)
+                       max_retries=2, mode=mode, no_degrade=no_degrade,
+                       config=eval_config)
         result.success = fsm.run()
         result.attempts = fsm.attempt + 1
     except Exception as e:

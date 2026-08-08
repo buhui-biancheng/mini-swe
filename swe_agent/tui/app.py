@@ -38,6 +38,8 @@ class ChatApp(App):
         self.current_dir = os.path.abspath(project_dir) if project_dir else os.getcwd()
         self.conversation_history: list[dict] = []
         self.thinking_collapsed: bool = True
+        self.thinking_enabled: bool = True   # 思考模式开关（/think 切换）
+        self.reasoning_effort: str = "high"  # 推理强度（/effort 调整）
         self._init_agent()
 
     def _init_agent(self) -> None:
@@ -192,6 +194,15 @@ class ChatApp(App):
             self._show_help()
         elif cmd == "/status":
             self._show_status()
+        elif cmd == "/think":
+            self.thinking_enabled = not self.thinking_enabled
+            self._add_system(f"思考模式: {'开启' if self.thinking_enabled else '关闭'}")
+        elif cmd == "/effort":
+            if arg in ("low", "medium", "high", "max"):
+                self.reasoning_effort = arg
+                self._add_system(f"推理强度: {arg}")
+            else:
+                self._add_system("用法: /effort low|medium|high|max")
         elif cmd == "/clear":
             self.action_clear()
         elif cmd == "/reset":
@@ -221,6 +232,8 @@ class ChatApp(App):
             "  fix [文件]  修复 bug\n"
             "  /help       帮助\n"
             "  /status     状态\n"
+            "  /think      切换思考模式\n"
+            "  /effort X   推理强度 low/medium/high/max\n"
             "  /clear      清空\n"
             "  /reset      重置对话\n"
             "  /quit       退出"
@@ -231,6 +244,7 @@ class ChatApp(App):
             f"状态: {self.state.status}\n"
             f"步骤: {self.state.step}/{self.state.max_steps}\n"
             f"Token: {self.state.token_usage}\n"
+            f"思考: {'开' if self.thinking_enabled else '关'} / 强度: {self.reasoning_effort}\n"
             f"目录: {self.current_dir}\n"
             f"对话轮数: {len(self.conversation_history)}"
         )
@@ -363,8 +377,8 @@ class ChatApp(App):
                     lambda: self.llm_client.chat(
                         messages=self.conversation_history,
                         tools=self.tools,
-                        thinking=True,
-                        reasoning_effort="max",
+                        thinking=self.thinking_enabled,
+                        reasoning_effort=self.reasoning_effort,
                         stream=True,
                         on_reasoning_token=on_reasoning,
                         on_token=on_content,

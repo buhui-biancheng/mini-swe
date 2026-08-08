@@ -78,7 +78,8 @@ def _mock_chat(fsm, captured=None):
     bucket = [] if captured is None else captured
 
     def fake_chat(messages, tools=None, tool_executor=None,
-                  max_rounds=5, usage_callback=None):
+                  max_rounds=5, usage_callback=None,
+                  thinking=False, reasoning_effort="high"):
         bucket.append(list(messages))
         if usage_callback:
             usage_callback({})  # 空 usage，不干扰预算测试
@@ -233,7 +234,8 @@ class TestCancel:
         fsm, _ = _make_fsm(bug_project, monkeypatch)
 
         def boom(messages, tools=None, tool_executor=None,
-                 max_rounds=5, usage_callback=None):
+                 max_rounds=5, usage_callback=None,
+                       thinking=False, reasoning_effort="high"):
             raise AgentAPIError("持续失败")
 
         fsm.client.chat_with_tools = boom
@@ -265,7 +267,8 @@ class TestTokenBudget:
         fsm.token_budget.total = 95  # 入口未超限
 
         def chat_with_big_usage(messages, tools=None, tool_executor=None,
-                                max_rounds=5, usage_callback=None):
+                                max_rounds=5, usage_callback=None,
+                       thinking=False, reasoning_effort="high"):
             if usage_callback:
                 usage_callback({"total_tokens": 20})  # 95+20=115 > 100 → 中途超限
             return ("done", messages)
@@ -285,7 +288,8 @@ class TestTokenBudget:
         fsm.token_budget.total = 95
 
         def chat_with_big_usage(messages, tools=None, tool_executor=None,
-                                max_rounds=5, usage_callback=None):
+                                max_rounds=5, usage_callback=None,
+                       thinking=False, reasoning_effort="high"):
             if usage_callback:
                 usage_callback({"total_tokens": 20})
             return ("done", messages)
@@ -383,7 +387,8 @@ class TestCheckState:
 
         # mock LLM：第一轮（patch 重修复）把语法修好
         def fixing_chat(messages, tools=None, tool_executor=None,
-                        max_rounds=5, usage_callback=None):
+                        max_rounds=5, usage_callback=None,
+                       thinking=False, reasoning_effort="high"):
             bug_file = os.path.join(str(bug_project), "bug.py")
             with open(bug_file, "w", encoding="utf-8") as f:
                 f.write("def broken():\n    pass\n")
