@@ -73,6 +73,16 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     # token 消耗 = token_budget.total（整组累计），工具调用数 = tool_call_count
     token_total = getattr(fsm.token_budget, "total", 0)
     tool_calls = getattr(fsm, "tool_call_count", 0)
+    # 成本估算（元）：DeepSeek 定价——输入未命中 1 元/百万、缓存命中 0.02、输出 2
+    cost_yuan = 0.0
+    cost_detail = {}
+    try:
+        tb = fsm.token_budget
+        cost_yuan = tb.estimate_cost()
+        cost_detail = {"prompt": tb.prompt_total, "completion": tb.completion_total,
+                       "cached": tb.cached_total}
+    except Exception:
+        pass
     # PASS_TO_PASS 回归验证（官方 harness 口径，2026-08-08）：
     # FSM 成功（FTP 过）后，再跑 P2P——全过才算官方 resolve；有挂 = 引入回归
     p2p_pass = None
@@ -91,7 +101,8 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
             "graph_level": graph_level, "p2p_pass": p2p_pass,
-            "p2p_detail": p2p_detail}
+            "p2p_detail": p2p_detail,
+            "cost_yuan": cost_yuan, "cost_detail": cost_detail}
 
 
 def main():

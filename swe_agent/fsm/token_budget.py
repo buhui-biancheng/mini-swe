@@ -19,6 +19,10 @@ class TokenBudget:
     def __init__(self, limit: Optional[int] = 100000):
         self.limit = limit  # None = 无上限（评测用）
         self.total = 0
+        # 成本明细（2026-08-08 评测加）：缓存命中的输入远便宜于未命中
+        self.prompt_total = 0       # 输入 token（含缓存命中）
+        self.completion_total = 0   # 输出 token
+        self.cached_total = 0       # 缓存命中 token（DeepSeek prefix caching）
 
     def add(self, usage: Optional[dict]) -> int:
         """累加一次 LLM 调用的 usage，返回累计总量。"""
@@ -28,7 +32,24 @@ class TokenBudget:
         if total is None:
             total = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
         self.total += int(total or 0)
+        # 明细：DeepSeek usage.prompt_tokens_details.cached_tokens
+        pt = int(usage.get("prompt_tokens", 0) or 0)
+        ct = int(usage.get("completion_tokens", 0) or 0)
+        cached = 0
+        details = usage.get("prompt_tokens_details") or {}
+        if isinstance(details, dict):
+            cached = int(details.get("cached_tokens", 0) or 0)
+        self.prompt_total += pt
+        self.completion_total += ct
+        self.cached_total += cached
         return self.total
+
+    def estimate_cost(self, price_in=1.0, price_cached=0.02, price_out=2.0) -> float:
+        """估算成本（元）。默认 DeepSeek 定价：输入未命中 1 元/百万、命中 0.02、输出 2。"""
+        p = (self.prompt_total - self.cached_total) / 1e6 * price_in
+        c = self.cached_total / 1e6 * price_cached
+        o = self.completion_total / 1e6 * price_out
+        return round(p + c + o, 4)
 
     def exceeded(self) -> bool:
         """是否超限（limit=None 永不超限）。"""
