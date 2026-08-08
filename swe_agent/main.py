@@ -145,6 +145,7 @@ def run_agent_fsm(
     python_version: str = "3.11",
     packages: list[str] | None = None,
     mode: str = "auto",
+    sandbox: bool = False,
 ) -> bool:
     """FSM 状态机 Agent（新增）。
 
@@ -168,6 +169,7 @@ def run_agent_fsm(
         python_version=python_version,
         packages=packages,
         mode=mode,
+        sandbox=sandbox,
     )
     return fsm.run()
 
@@ -180,6 +182,7 @@ def run_agent(
     packages: list[str] | None = None,
     use_fsm: bool = False,
     mode: str = "auto",
+    sandbox: bool = False,
 ) -> bool:
     """运行 Agent 修复 bug（统一入口）。
 
@@ -196,7 +199,7 @@ def run_agent(
         True 表示修复成功，False 表示失败
     """
     if use_fsm:
-        return run_agent_fsm(bug_file, test_command, max_retries, python_version, packages, mode)
+        return run_agent_fsm(bug_file, test_command, max_retries, python_version, packages, mode, sandbox)
     else:
         return run_agent_linear(bug_file, test_command, max_retries, python_version, packages)
 
@@ -236,6 +239,8 @@ def main():
     fix_parser.add_argument("--fsm", action="store_true", help="使用 FSM 状态机模式")
     fix_parser.add_argument("--mode", choices=["dp", "greedy", "auto"], default=None,
                             help="运行模式：dp=图索引引导 / greedy=无图探索 / auto=自动。指定 --mode 时自动启用 FSM")
+    fix_parser.add_argument("--sandbox", action="store_true",
+                            help="两层沙盒模式：真实代码只读，Agent 在 COW 副本工作")
 
     # diagnose 命令（Phase 7 模块 B）
     diag_parser = subparsers.add_parser("diagnose", help="从自然语言 Issue 定位 bug 候选")
@@ -290,6 +295,7 @@ def main():
             packages=args.packages,
             use_fsm=use_fsm,
             mode=mode,
+            sandbox=args.sandbox,
         )
         sys.exit(0 if success else 1)
     elif args.command == "fix-intent":

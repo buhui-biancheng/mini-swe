@@ -18,13 +18,15 @@ class ToolRegistry:
 
     def __init__(self, skeleton_text: str = "", code_dir: str = ".",
                  python_version: str = "3.11", packages: list[str] | None = None,
-                 graph_index=None, fence=None, graph_manager=None):
+                 graph_index=None, fence=None, graph_manager=None,
+                 sandbox: bool = False):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
         self.packages = packages or ["pytest"]
         self.graph_index = graph_index  # GraphIndex（迁移后优先使用）
-        self.graph_manager = graph_manager  # Phase 5 JIT 补全用
+        self.graph_manager = graph_manager  # Phase 5 JIT
+        self.sandbox = sandbox  # Phase 6 补全用
         self.fence = fence              # PermissionFence（Phase 2 权限围栏）
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
@@ -269,6 +271,11 @@ class ToolRegistry:
         try:
             # 安全检查：禁止危险命令
             dangerous = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if="]
+            # Phase 6 沙盒模式：命令在容器内执行（只读挂载+tmpfs），Agent 碰不到宿主机
+            if self.sandbox:
+                from swe_agent.sandbox.docker_runner import run_in_docker
+                r = run_in_docker(self.code_dir, command, timeout=60)
+                return {"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code}
             for d in dangerous:
                 if d in command.lower():
                     return {"error": f"危险命令被禁止: {command}"}

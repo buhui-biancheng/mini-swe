@@ -230,6 +230,7 @@ class AgentFSM:
             graph_index=self.graph_index,
             fence=self.fence,
             graph_manager=self.graph_manager,
+            sandbox=self.sandbox,
         )
 
         # 防死循环、快照、语法防火墙
