@@ -818,20 +818,27 @@ class AgentFSM:
         排序的错误列表（影响面最大的那条优先定位）。
         模块 A 升级：对影响面最大的错误节点注入 L1 邻接（图引导跨文件追踪）。
         """
-        lines = ["【测试失败】测试未通过，以下是结构化错误信息（已按图影响面排序）："]
+        _head = ("【测试失败】测试未通过，以下是结构化错误信息（已按图影响面排序）："
+                 if self.graph_enabled
+                 else "【测试失败】测试未通过，以下是结构化错误信息：")
+        lines = [_head]
         enriched = []
         for e in parsed.grouped_errors:
             top_node, impact = self._error_impact_representative(e)
             enriched.append((e, top_node, impact))
-        # 影响面降序（匹配不到图节点的放最后）
-        enriched.sort(key=lambda x: x[2] if x[2] is not None else -1.0, reverse=True)
+        # 影响面降序（匹配不到图节点的放最后）；图先验消融：无图时不排序（保持原始错误顺序）
+        if self.graph_enabled:
+            enriched.sort(key=lambda x: x[2] if x[2] is not None else -1.0, reverse=True)
 
         if enriched:
             for i, (e, node, impact) in enumerate(enriched):
                 loc = f"{e.file}:{e.lineno}" if e.file else "(无法解析位置)"
-                impact_str = f"影响面={impact:.4f}" if impact is not None else "影响面=?"
-                mark = " ← 影响面最大，优先定位" if i == 0 and impact is not None else ""
-                lines.append(f"- {e.error_type} @ {loc} [{impact_str}]{mark}")
+                if self.graph_enabled and impact is not None:
+                    impact_str = f"影响面={impact:.4f}"
+                    mark = " ← 影响面最大，优先定位" if i == 0 else ""
+                    lines.append(f"- {e.error_type} @ {loc} [{impact_str}]{mark}")
+                else:
+                    lines.append(f"- {e.error_type} @ {loc}")
                 if e.callsite:
                     lines.append(f"  调用链: {' → '.join(e.callsite)}")
                 lines.append(
