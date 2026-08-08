@@ -66,7 +66,8 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                    max_retries=6,  # 2026-08-08：难档重测（65 行重写需更多尝试；简单任务 2 次够）
                    mode=mode, no_degrade=no_degrade,
                    python_version="3.8", packages=REPO_DEPS[repo],
-                   config=cfg, graph_level=graph_level)
+                   config=cfg, graph_level=graph_level,
+                   early_stop=True)
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)

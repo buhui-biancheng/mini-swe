@@ -176,6 +176,8 @@ class AgentFSM:
         sandbox: bool = False,
         config=None,
         graph_level: int = 2,
+        early_stop: bool = False,
+        early_stop_patience: int = 2,
     ):
         """初始化 Agent FSM。
 
@@ -202,6 +204,10 @@ class AgentFSM:
         #   0 = 纯贪心（无任何图信息）；1 = 只有细准（L1 函数级，无文件级先验）
         #   2 = 完整（粗准 L-1/L0/骨架 + 细准 L1/影响面标注）
         self.graph_level = graph_level
+        # 收益早停（2026-08-08）：每次尝试后记录失败用例数，连续无进展则提前停
+        self.early_stop = early_stop
+        self.early_stop_patience = max(1, early_stop_patience)
+        self.attempt_trajectory = []  # [{attempt, fail_count, token, cost}] 尝试轨迹
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
             real_dir = self.code_dir
@@ -815,6 +821,22 @@ class AgentFSM:
                 self.logger.rollback_triggered("impact", self.bug_file)
                 self.rollback()  # test → rollback
                 return
+
+            # 收益早停（2026-08-08）：失败用例数连续无进展 → 提前停
+            self.attempt_trajectory.append({
+                "attempt": self.attempt,
+                "fail_count": len(parsed.grouped_errors),
+                "token": self.token_budget.total,
+                "cost": self.token_budget.estimate_cost(),
+            })
+            if self.early_stop and len(self.attempt_trajectory) > self.early_stop_patience:
+                recent = self.attempt_trajectory[-self.early_stop_patience:]
+                best = min(x["fail_count"] for x in self.attempt_trajectory[:-self.early_stop_patience])
+                if all(x["fail_count"] >= best for x in recent):
+                    print(f"[EARLY-STOP] 连续 {self.early_stop_patience} 次无进展"
+                          f"（失败数 {[x['fail_count'] for x in recent]} ≥ 历史最佳 {best}），提前停止")
+                    self.retries_exhausted()
+                    return
 
             # 影响面 < 阈值 → LOCATE（新起点 = 结构化错误路径，继续修不走原路）
             self.attempt += 1
