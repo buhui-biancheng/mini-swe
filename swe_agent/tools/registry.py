@@ -18,17 +18,19 @@ class ToolRegistry:
 
     def __init__(self, skeleton_text: str = "", code_dir: str = ".",
                  python_version: str = "3.11", packages: list[str] | None = None,
-                 graph_index=None, fence=None):
+                 graph_index=None, fence=None, graph_manager=None):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
         self.packages = packages or ["pytest"]
         self.graph_index = graph_index  # GraphIndex（迁移后优先使用）
+        self.graph_manager = graph_manager  # Phase 5 JIT 补全用
         self.fence = fence              # PermissionFence（Phase 2 权限围栏）
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
             "view_file": self._view_file,
             "edit_function": self._edit_function,
+            "report_graph_update": self._report_graph_update,  # Phase 5 JIT
             "run_test": self._run_test,
             "run_command": self._run_command,
         }
@@ -180,6 +182,18 @@ class ToolRegistry:
         if label:
             result["function"] = label
         return result
+
+    def _report_graph_update(self, node_id: str, target: str,
+                             edge_type: str, evidence: str) -> dict:
+        """JIT 图谱补全：提交补全建议 → 系统验证 → 写入。
+
+        返回 dict（execute 统一 json.dumps，避免双重序列化）。
+        """
+        if self.graph_index is None:
+            return {"error": "JIT 补全不可用：无图索引"}
+        if self.graph_manager is None:
+            return {"error": "JIT 补全不可用：无 GraphManager"}
+        return self.graph_manager.apply_jit_update(node_id, target, edge_type, evidence)
 
     def _edit_function(self, file_path: str, start_line: int, end_line: int, new_code: str) -> dict:
         # 围栏软约束：警告 + 代价惩罚，不拦截（bug 所在文件必须能修）

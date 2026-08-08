@@ -215,6 +215,7 @@ class AgentFSM:
             packages=self.packages,
             graph_index=self.graph_index,
             fence=self.fence,
+            graph_manager=self.graph_manager,
         )
 
         # 防死循环、快照、语法防火墙

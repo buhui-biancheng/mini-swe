@@ -78,8 +78,8 @@ class TestSchemas:
         assert args.command == "pytest test.py"
 
     def test_tools_list_length(self):
-        # Phase 2 简化：expand 并入 view_file，6 → 5 工具
-        assert len(TOOLS) == 5
+        # Phase 2 简化：6 → 5 工具；Phase 5 JIT：+report_graph_update → 6
+        assert len(TOOLS) == 6
 
     def test_tools_have_correct_types(self):
         for tool in TOOLS:

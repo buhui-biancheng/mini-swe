@@ -40,6 +40,14 @@ class RunCommandArgs(BaseModel):
     command: str = Field(description="要执行的终端命令，如 'ls -la'")
 
 
+class ReportGraphUpdateArgs(BaseModel):
+    """JIT 图谱补全（Phase 5）：AI 提交反射调用补全建议。"""
+    node_id: str = Field(description="反射节点 id（is_reflection=true 的节点）")
+    target: str = Field(description="补全的目标节点 id（实际调用目标）")
+    edge_type: str = Field(description="边类型（call/data/import 等）")
+    evidence: str = Field(description="证据说明（读了哪个文件哪段源码，如何确定目标）")
+
+
 # 工具名称到 Schema 的映射（Phase 2 简化：expand 并入 view_file，6 → 5）
 TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
@@ -47,6 +55,7 @@ TOOL_SCHEMAS = {
     "edit_function": EditFunctionArgs,
     "run_test": RunTestArgs,
     "run_command": RunCommandArgs,
+    "report_graph_update": ReportGraphUpdateArgs,  # Phase 5 JIT
 }
 
 
@@ -104,6 +113,14 @@ TOOLS = [
             "name": "run_test",
             "description": "在 Docker 沙盒中运行测试命令，返回 stdout/stderr/exit_code",
             "parameters": RunTestArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_graph_update",
+            "description": "JIT 图谱补全：提交反射调用补全建议（node_id 是 is_reflection=true 的节点，target 是实际调用目标），系统验证后写入图",
+            "parameters": ReportGraphUpdateArgs.model_json_schema(),
         },
     },
     {

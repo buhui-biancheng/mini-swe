@@ -17,7 +17,7 @@ from typing import Optional
 from .builder import GraphBuilder
 from .config import AgentConfig
 from .index import GraphIndex
-from .models import GraphData
+from .models import Edge, EdgeType, GraphData
 from . import persistence
 
 
@@ -171,6 +171,54 @@ class GraphManager:
             node = self._index.graph.nodes.get(node_id)
             if node:
                 node.fail_count = entry["fail"]
+
+    def apply_jit_update(self, node_id: str, target: str,
+                        edge_type: str, evidence: str) -> dict:
+        """JIT 图谱补全（Phase 5）：验证 + 写入 + 持久化。
+
+        四层防幻觉防线：
+            1. 证据绑定：evidence 非空
+            2. 系统验证：源节点是反射节点 + 目标节点真实存在
+            3. 文件绑定：源节点 is_reflection=true（只补反射节点）
+            4. 确定性规则：目标不存在 / 边已存在 / 自环 → 拒绝
+
+        Returns:
+            {"accepted": bool, "reason": str}
+        """
+        g = self._index.graph if self._index else None
+        if g is None:
+            return {"accepted": False, "reason": "图未加载"}
+        # 防线 0（幂等优先）：边已存在 → 拒绝（在反射检查之前，已解析的节点重复提交也能正确拒绝）
+        for e in g.edges:
+            if e.source == node_id and e.target == target:
+                return {"accepted": False, "reason": "该边已存在（幂等）"}
+        # 防线 4b：不允许自环
+        if node_id == target:
+            return {"accepted": False, "reason": "自环补全拒绝"}
+        # 防线 2：源节点存在且是反射节点
+        src = g.nodes.get(node_id)
+        if src is None:
+            return {"accepted": False, "reason": f"源节点不存在: {node_id}"}
+        if not src.is_reflection:
+            return {"accepted": False, "reason": f"源节点非反射节点: {node_id}"}
+        # 防线 4a：目标存在
+        tgt = g.nodes.get(target)
+        if tgt is None:
+            return {"accepted": False, "reason": f"目标节点不存在: {target}"}
+        # 防线 4c：非法边类型
+        try:
+            et = EdgeType(edge_type)
+        except ValueError:
+            return {"accepted": False, "reason": f"非法边类型: {edge_type}"}
+        # 防线 1：证据非空
+        if not evidence or len(evidence.strip()) < 5:
+            return {"accepted": False, "reason": "证据不足（<5 字符）"}
+
+        # 写入：新增边 + 标签 resolved + 持久化
+        g.edges.append(Edge(source=node_id, target=target, edge_type=et))
+        src.is_reflection = False  # 已解析（原 true → 不再标记）
+        self._persist(g)
+        return {"accepted": True, "reason": "已写入", "edge": f"{node_id} -> {target}"}
 
     def get_weights_snapshot(self) -> dict:
         """返回权重完整快照（Phase 4 机制四：回退用）。"""
