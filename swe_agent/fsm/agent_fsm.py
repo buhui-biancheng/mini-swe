@@ -167,6 +167,7 @@ class AgentFSM:
         self,
         bug_file: str,
         test_command: str,
+        code_dir: Optional[str] = None,
         max_retries: int = 2,
         python_version: str = "3.11",
         packages: list[str] | None = None,
@@ -190,7 +191,9 @@ class AgentFSM:
         self.max_retries = max_retries
         self.python_version = python_version
         self.packages = packages or ["pytest"]
-        self.code_dir = os.path.dirname(self.bug_file)
+        # code_dir：显式传入（SWE-bench 多文件 repo = 项目根）或默认 bug 文件所在目录
+        # 2026-08-08：修"bug 在子目录 + 测试在根目录"场景（容器必须挂载整个项目）
+        self.code_dir = os.path.abspath(code_dir) if code_dir else os.path.dirname(self.bug_file)
         # Phase 6 两层沙盒：真实代码只读，Agent 在 COW 副本工作
         self.sandbox = sandbox
         self._l1 = None
@@ -716,15 +719,17 @@ class AgentFSM:
         container_command = self.test_command
         if self.code_dir in container_command:
             container_command = container_command.replace(self.code_dir, "/workspace")
-        # 去掉目录前缀
-        container_command = re.sub(r'(?:^|\s)(?:examples|tests|eval)/', ' ', container_command)
+        # 保留测试命令原样（2026-08-08：不再剥 tests/ 前缀——SWE-bench 测试路径必须完整）
         container_command = ' '.join(container_command.split())
 
         print(f"\n[TEST] 运行测试: {container_command}")
         self._log_state_enter("test", self.attempt)
 
         from swe_agent.sandbox.docker_runner import run_in_docker
-        test_result = run_in_docker(self.code_dir, container_command)
+        # 2026-08-08：传 python_version/packages（评测环境注入），network=False 保持沙盒断网
+        test_result = run_in_docker(
+            self.code_dir, container_command,
+            python_version=self.python_version, packages=self.packages)
 
         print(f"[TEST] exit_code: {test_result.exit_code}")
         if test_result.stdout:

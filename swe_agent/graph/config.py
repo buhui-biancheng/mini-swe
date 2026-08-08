@@ -4,6 +4,7 @@
 """
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -20,7 +21,7 @@ class AgentConfig:
     rollback_limit: int = 3          # 最大回滚次数
     check_fail_limit: int = 3        # 连续语法检查失败阈值（触发回滚）
     max_steps: int = 50              # 最大步骤数
-    token_budget: int = 100000       # Token 预算
+    token_budget: Optional[int] = 100000  # Token 预算（None=无上限，评测用）
 
     # 权限围栏（Phase 2 模块 B）
     fence_penalty: float = 2.0       # 高影响文件的影响面代价惩罚乘数

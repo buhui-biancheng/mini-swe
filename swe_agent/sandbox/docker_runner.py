@@ -148,6 +148,7 @@ def run_in_docker(
     python_version: str | None = None,
     packages: list[str] | None = None,
     timeout: int = 60,
+    network: bool = False,
 ) -> ExecutionResult:
     """在隔离的 Docker 容器中执行命令。
 
@@ -194,7 +195,7 @@ def run_in_docker(
             },
             working_dir="/workspace",
             mem_limit="1g",
-            network_disabled=True,
+            network_disabled=not network,
             read_only=True,
             privileged=False,
             tmpfs={"/tmp": "size=200m"},

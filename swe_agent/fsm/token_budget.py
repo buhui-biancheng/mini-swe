@@ -16,8 +16,8 @@ class TokenBudgetExceeded(Exception):
 class TokenBudget:
     """Token 预算管理。"""
 
-    def __init__(self, limit: int = 100000):
-        self.limit = limit
+    def __init__(self, limit: Optional[int] = 100000):
+        self.limit = limit  # None = 无上限（评测用）
         self.total = 0
 
     def add(self, usage: Optional[dict]) -> int:
@@ -31,11 +31,15 @@ class TokenBudget:
         return self.total
 
     def exceeded(self) -> bool:
-        """是否超限。"""
+        """是否超限（limit=None 永不超限）。"""
+        if self.limit is None:
+            return False
         return self.total > self.limit
 
     def remaining(self) -> int:
-        """剩余额度（不小于 0）。"""
+        """剩余额度（limit=None 返回 -1 表示无限制）。"""
+        if self.limit is None:
+            return -1
         return max(0, self.limit - self.total)
 
     def reset(self) -> None:
