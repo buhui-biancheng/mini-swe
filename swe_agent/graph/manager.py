@@ -172,6 +172,18 @@ class GraphManager:
             if node:
                 node.fail_count = entry["fail"]
 
+    def get_weights_snapshot(self) -> dict:
+        """返回权重完整快照（Phase 4 机制四：回退用）。"""
+        if not self._weights:
+            self.load_weights()
+        return dict(self._weights)
+
+    def restore_weights_snapshot(self, weights: dict) -> None:
+        """从快照恢复权重并持久化（Phase 4 机制四：权重回退）。"""
+        self._weights = dict(weights)
+        self.save_weights()
+        self._merge_weights()
+
     def _merge_weights(self) -> None:
         """把持久化权重合并到当前图节点。"""
         if not self._weights:

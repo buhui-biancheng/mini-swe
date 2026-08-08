@@ -45,6 +45,7 @@ from swe_agent.graph import (
     save_full_log,
     compute_edited_impact,
 )
+from swe_agent.snapshot import SnapshotManager
 from swe_agent.tools.registry import ToolRegistry
 from swe_agent.tools.schemas import TOOLS
 from swe_agent.utils.logger import AgentLogger
@@ -219,6 +220,11 @@ class AgentFSM:
         # 防死循环、快照、语法防火墙
         self.watchdog = Watchdog()
         self.checkpoint = Checkpoint()
+        self.snapshot_mgr = SnapshotManager(
+            self.code_dir, task_id=os.path.basename(self.code_dir))
+        self._initial_weights: dict = {}
+        self._last_silent_errors: list = []
+        self._cognition_history: list = []  # Phase 4 机制二：修改历史（认知保持）
         self.syntax_firewall = SyntaxFirewall()
         self._syntax_errors: list = []
 
@@ -419,6 +425,10 @@ class AgentFSM:
                         int(arguments.get("start_line", 1)),
                         int(arguments.get("end_line", 1)),
                     ))
+                    # Phase 4 机制二：认知保持（记录修改历史，回退时注入）
+                    self._cognition_history.append(
+                        f"{os.path.basename(file_path)}:{arguments.get('start_line', 1)}"
+                        f"-{arguments.get('end_line', 1)} 编辑")
 
             # 追踪无进展
             stuck, reason = self.watchdog.check_stuck()
@@ -519,6 +529,8 @@ class AgentFSM:
 
         self.watchdog.reset_all()
         self.checkpoint.clear()
+        # Phase 4 机制四：任务开始时记录初始权重（失败/取消时回退到它）
+        self._initial_weights = self.graph_manager.get_weights_snapshot()
         self.tool_call_count = 0
         self._syntax_errors = []
         self._log_state_enter("init", self.attempt)
@@ -706,6 +718,14 @@ class AgentFSM:
 
         if test_result.exit_code == 0:
             self._last_test_failed = False
+            # Phase 4 机制三增强：异常信号检查（静默报错检测）
+            # exit 0 但日志含异常模式 → 记录可疑信号（不强制回退，避免误伤）
+            silent = sorted(set(re.findall(
+                r"(Traceback|NameError|TypeError|ValueError|AssertionError|KeyError|IndexError|Exception|Error)",
+                raw_log)))
+            if silent:
+                print(f"[TEST] ⚠️ 静默报错信号（exit 0 但日志含）: {silent}")
+                self._last_silent_errors = silent
             # 修复成功：给实际编辑的函数动态权重 +1（图索引）
             targets = self._success_weight_targets()
             for node_id in targets:
@@ -844,17 +864,6 @@ class AgentFSM:
         return "\n".join(lines)
 
     def _on_enter_rollback(self) -> None:
-        # 缺陷3：回滚 = 失败一次，记录 fail_count（图不被假成功污染）
-        try:
-            for fp, _, _ in self._edited_ranges:
-                base = os.path.basename(fp)
-                for n in self.graph_index.graph.nodes.values():
-                    if n.node_type.value == "function" and os.path.basename(n.file) == base:
-                        self.graph_manager.record_failure(n.node_id)
-                        break
-        except Exception:
-            pass
-
         """ROLLBACK 状态：代价熔断，恢复初始快照 + 重置规划路径。"""
         self._log_state_enter("rollback", self.attempt)
 
@@ -867,6 +876,26 @@ class AgentFSM:
         self.logger.snapshot_restored(f"<{restored} files>")
         self.logger.rollback_triggered("rollback", self.bug_file)
 
+        # Phase 4 机制四：权重回退到初始快照（失败路径不污染图）
+        try:
+            if self._initial_weights:
+                self.graph_manager.restore_weights_snapshot(self._initial_weights)
+                print("[ROLLBACK] 权重已回退到初始快照")
+        except Exception as e:
+            print(f"[ROLLBACK] 权重回退失败: {e}")
+
+        # 缺陷3：回滚 = 失败一次，记录 fail_count（放在权重回退之后：
+        # fail 是历史事实不该被回退，success 回退但 fail 保留）
+        try:
+            for fp, _, _ in self._edited_ranges:
+                base = os.path.basename(fp)
+                for n in self.graph_index.graph.nodes.values():
+                    if n.node_type.value == "function" and os.path.basename(n.file) == base:
+                        self.graph_manager.record_failure(n.node_id)
+                        break
+        except Exception:
+            pass
+
         # 清理规划路径（不沿用旧方案）
         self._edited_ranges = []
         self.rollback_count += 1
@@ -875,8 +904,10 @@ class AgentFSM:
 
         if self.rollback_count < self.agent_config.rollback_limit:
             print(f"[ROLLBACK] 重新规划（{self.rollback_count}/{self.agent_config.rollback_limit}）")
+            hist = "、".join(self._cognition_history[-5:]) or "（无）"
             self.messages.append({"role": "user", "content": (
-                "上一轮修改路径已回退，当前文件状态已恢复初始快照。"
+                "上一轮修改路径已回退，当前文件状态已恢复初始快照。\n"
+                f"[历史认知] 你之前完成的修改: {hist}\n"
                 "请基于当前状态重新规划，尝试不同的修复策略。"
                 "上一轮的规划路径已清理，请勿沿用。"
             )})
@@ -942,6 +973,8 @@ class AgentFSM:
         return [max(candidates, key=lambda n: n.in_degree).node_id]
 
     def _on_enter_success(self) -> None:
+        # Phase 4：任务成功，清理快照（权重已持久化保留）
+        self.snapshot_mgr.clear()
         """SUCCESS 状态：修复成功。"""
         # Greedy 修复成功 → 回写图权重已做，切回 DP（模块 F）
         if self.effective_mode == "greedy":
@@ -955,6 +988,13 @@ class AgentFSM:
         self.logger.success(self.attempt + 1)
 
     def _on_enter_fail(self) -> None:
+        # Phase 4 机制四：任务失败，权重回退到初始快照
+        try:
+            if self._initial_weights:
+                self.graph_manager.restore_weights_snapshot(self._initial_weights)
+                print("[FAIL] 权重已回退到初始快照")
+        except Exception:
+            pass
         """FAIL 状态：修复失败。"""
         reason = self._cancel_reason or f"已用尽 {self.max_retries + 1} 次尝试"
         print(f"\n{'='*50}")
