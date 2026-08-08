@@ -846,12 +846,18 @@ class AgentFSM:
                     for x in recent)
                 if not progressed:
                     print(f"[EARLY-STOP] 连续 {self.early_stop_patience} 次无进展"
-                          f"（失败数 {[x['fail_count'] for x in recent]}，签名未变），降级 Greedy 重试")
-                    # 三修③：降级清上下文重来（最后机会），而非直接判负
-                    self._switch_mode("greedy", reason="early_stop")
-                    self.messages = [{"role": "user", "content": self._plain_task_msg}]
-                    self._rollback_notice = True
-                    self.degrade()  # → locate
+                          f"（失败数 {[x['fail_count'] for x in recent]}，签名未变）")
+                    if self.no_degrade:
+                        # 评测禁降级（消融变量控制）：直接停止
+                        print("[EARLY-STOP] no_degrade 模式，直接停止")
+                        self.retries_exhausted()
+                    else:
+                        # 产品模式：降级清上下文重来（最后机会）
+                        print("[EARLY-STOP] 降级 Greedy 重试")
+                        self._switch_mode("greedy", reason="early_stop")
+                        self.messages = [{"role": "user", "content": self._plain_task_msg}]
+                        self._rollback_notice = True
+                        self.degrade()  # → locate
                     return
 
             # 影响面 < 阈值 → LOCATE（新起点 = 结构化错误路径，继续修不走原路）
