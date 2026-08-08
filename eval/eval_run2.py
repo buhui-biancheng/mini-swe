@@ -21,7 +21,7 @@ REPO_DIR = {"pallets/flask": "flask", "pylint-dev/pylint": "pylint",
             "pytest-dev/pytest": "pytest", "psf/requests": "requests"}
 REPO_DEPS = {
     "psf/requests": ["pytest==6.2.5", "urllib3==1.26.18", "idna==2.10", "certifi", "charset_normalizer==2.1.1", "PySocks"],
-    "pallets/flask": ["pytest==6.2.5", "werkzeug==2.2.3", "jinja2==3.1.2", "click==8.1.7", "itsdangerous==2.1.2", "MarkupSafe==2.1.3"],
+    "pallets/flask": ["pytest==6.2.5", "werkzeug==2.2.3", "jinja2==3.1.2", "click==8.1.7", "itsdangerous==2.1.2", "MarkupSafe==2.1.3", "blinker==1.7.0", "importlib_metadata==6.7.0"],
     "pylint-dev/pylint": ["pytest==6.2.5", "astroid==2.15.8", "isort==5.12.0", "mccabe==0.7.0", "toml"],
     "pytest-dev/pytest": ["pytest==6.2.5", "pluggy==1.0.0", "iniconfig", "packaging", "py==1.11.0", "attrs==22.2.0"],
 }
@@ -112,7 +112,7 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
 def main():
     with open(os.path.join(DATA, "oracle_valid.json"), encoding="utf-8") as f:
         valid = json.load(f)
-    with open(os.path.join(DATA, "swebench_subset.json"), encoding="utf-8") as f:
+    with open(os.path.join(DATA, "swebench_subset_v2.json"), encoding="utf-8") as f:
         instances = {i["instance_id"]: i for i in json.load(f)}
 
     results = []
