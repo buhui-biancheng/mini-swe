@@ -90,7 +90,11 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     if success:
         p2p = eval(inst["PASS_TO_PASS"])
         if p2p:
-            cmd2 = (f"{src_hint}python3 -m pytest " + " ".join(f'"{x}"' for x in p2p[:40])
+            # 官方口径：按测试文件跑（逐节点 ID 会被参数化测试的 :: 拆断，如 IPv6 URL）
+            p2p_files = sorted({x.split("::")[0] for x in p2p if x.split("::")[0].endswith(".py")})
+            if not p2p_files:
+                p2p_files = [x.split("::")[0] for x in p2p][:5]
+            cmd2 = (f"{src_hint}python3 -m pytest " + " ".join(f'"{f}"' for f in p2p_files)
                     + " -q -p no:cacheprovider")
             r2 = run_in_docker(work, cmd2, python_version="3.8",
                                packages=REPO_DEPS[repo], timeout=600)

@@ -37,7 +37,10 @@ class TokenBudget:
         ct = int(usage.get("completion_tokens", 0) or 0)
         cached = 0
         details = usage.get("prompt_tokens_details") or {}
-        if isinstance(details, dict):
+        # openai 库返回 Pydantic 对象（PromptTokensDetails），也可能 dict
+        if hasattr(details, "cached_tokens"):
+            cached = int(details.cached_tokens or 0)
+        elif isinstance(details, dict):
             cached = int(details.get("cached_tokens", 0) or 0)
         self.prompt_total += pt
         self.completion_total += ct
