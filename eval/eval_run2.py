@@ -48,7 +48,7 @@ def make_worktree(inst):
     return work
 
 
-def run_one(inst, work, mode, no_degrade):
+def run_one(inst, work, mode, no_degrade, graph_enabled=True):
     repo = inst["repo"]
     gold_files = [f for f in inst["patch"].split("diff --git a/")[1:]]
     first = gold_files[0].split(" ")[0]
@@ -62,7 +62,7 @@ def run_one(inst, work, mode, no_degrade):
                    code_dir=work,  # 2026-08-08：容器挂载项目根（bug 在子目录也能跑根目录测试）
                    max_retries=2, mode=mode, no_degrade=no_degrade,
                    python_version="3.8", packages=REPO_DEPS[repo],
-                   config=cfg)
+                   config=cfg, graph_enabled=graph_enabled)
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)
@@ -84,11 +84,13 @@ def main():
             print(f"[FAIL] {iid} worktree 重建失败")
             continue
         print(f"\n===== {iid} =====", flush=True)
-        for mode, nd in [("greedy", True), ("dp", True), ("dp", False)]:
+        # 评测定稿三组（2026-08-08 修正：消融变量 = 图信息，不是降级开关）
+        # greedy(无图) / dp-无图(禁降级) / dp(禁降级)；dp(允许降级) 为产品对比补充组
+        for mode, nd, ge in [("greedy", True, True), ("dp", True, False), ("dp", True, True)]:
             label = f"{mode}{'-无图' if nd and mode=='dp' else ''}{'(允许降级)' if not nd and mode=='dp' else ''}"
             print(f"--- {label} ---", flush=True)
             try:
-                r = run_one(inst, work, mode, nd)
+                r = run_one(inst, work, mode, nd, ge)
                 print(f"  结果: {'✅ 成功' if r['success'] else '❌ 失败'} 尝试={r['attempts']} 耗时={r['duration']}s", flush=True)
                 r["instance_id"] = iid
                 results.append(r)

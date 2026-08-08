@@ -175,6 +175,7 @@ class AgentFSM:
         no_degrade: bool = False,
         sandbox: bool = False,
         config=None,
+        graph_enabled: bool = True,
     ):
         """初始化 Agent FSM。
 
@@ -197,6 +198,7 @@ class AgentFSM:
         # Phase 6 两层沙盒：真实代码只读，Agent 在 COW 副本工作
         self.sandbox = sandbox
         self._l1 = None
+        self.graph_enabled = graph_enabled  # 评测消融：dp-无图 关闭图注入（2026-08-08）
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
             real_dir = self.code_dir
@@ -219,7 +221,9 @@ class AgentFSM:
 
         self.graph_manager = GraphManager(self.code_dir, config=self.agent_config)
         self.graph_index = self.graph_manager.build()
-        self.skeleton_text = self.graph_index.generate_skeleton_text()
+        # 评测消融：dp-无图 时骨架（图信息）也为空
+        self.skeleton_text = (self.graph_index.generate_skeleton_text()
+                              if self.graph_enabled else "")
 
         # Phase 2：权限围栏 + 提示词分级 + TokenBudget
         self.fence = PermissionFence(self.graph_index, self.agent_config)
@@ -330,6 +334,8 @@ class AgentFSM:
         return [{"role": "system", "content": system}] + self.messages
 
     def _graph_context_text(self) -> str:
+        if not self.graph_enabled:
+            return ""
         """DP 模式：生成图索引上下文文本（L-1 文件级先验 + L0 摘要 + 报错节点邻接）。"""
         parts = []
 
@@ -389,6 +395,8 @@ class AgentFSM:
         return "\n\n".join(parts)
 
     def _file_level_prior_text(self) -> str:
+        if not self.graph_enabled:
+            return ""
         """L-1 文件级先验：委托 GraphIndex（2026-08-05 重构，diagnose 共用）。"""
         return self.graph_index.file_level_prior_text()
 
