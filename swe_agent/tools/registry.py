@@ -13,6 +13,24 @@ from swe_agent.ast_view.function_map import get_function_line_map, get_function_
 from swe_agent.sandbox.docker_runner import run_in_docker
 
 
+# 工具输出截断（2026-08-13 对齐行业标准 SWE-agent max_observation_length/Claude Code）：
+# 工具结果全部进对话历史且每轮重发——超长输出（pytest 全量/大文件）是
+# token 膨胀主因。截断保留尾部（pytest 失败摘要通常在末尾）+ clipped 标记。
+OUTPUT_TRUNCATE_CHARS = 4000
+
+
+def _truncate_output(text: str, limit: int = OUTPUT_TRUNCATE_CHARS) -> str:
+    """截断工具输出：超限保留头部 1000 + 尾部 limit-1000，中间省略标记。"""
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    tail = limit - head
+    return (text[:head] + f"\n...[输出截断，省略 {len(text) - limit} 字符]...\n"
+            + text[-tail:])
+
+
 class ToolRegistry:
     """工具注册与调度中心（Phase 2 简化：5 工具）。"""
 
@@ -275,7 +293,8 @@ class ToolRegistry:
             if self.sandbox:
                 from swe_agent.sandbox.docker_runner import run_in_docker
                 r = run_in_docker(self.code_dir, command, timeout=60)
-                return {"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code}
+                return {"stdout": _truncate_output(r.stdout), "stderr": _truncate_output(r.stderr, 1500),
+                        "exit_code": r.exit_code}
             for d in dangerous:
                 if d in command.lower():
                     return {"error": f"危险命令被禁止: {command}"}
