@@ -11,6 +11,7 @@
 """
 
 import ast
+from .languages import provider_for, RawSymbol, RawCall, SUPPORTED_EXTS
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -63,6 +64,7 @@ class _FileInfo:
     imports: dict = field(default_factory=dict)          # 局部名 -> _ImportBinding
     imported_module_paths: list = field(default_factory=list)  # 已导入的模块路径（含前缀）
     error: Optional[str] = None
+    raw_calls: dict = field(default_factory=dict)  # symbol_name -> [RawCall]（非 Python 语言）
 
 
 class GraphBuilder:
@@ -158,7 +160,7 @@ class GraphBuilder:
                 if not d.startswith('.') and d != '__pycache__' and d != 'venv'
             ]
             for filename in filenames:
-                if not filename.endswith('.py'):
+                if os.path.splitext(filename)[1] not in SUPPORTED_EXTS:
                     continue
                 abs_path = os.path.join(dirpath, filename)
                 rel_path = os.path.relpath(abs_path, self.code_dir)
@@ -170,6 +172,12 @@ class GraphBuilder:
         try:
             with open(abs_path, 'r', encoding='utf-8') as f:
                 source = f.read()
+            # 多语言（2026-08-08）：非 .py 走 Tree-sitter 解析（Python 保持 ast 路径）
+            if not rel_path.endswith(".py"):
+                provider = provider_for(rel_path)
+                if provider is not None:
+                    self._parse_file_ts(rel_path, abs_path, source, provider)
+                    return
             tree = ast.parse(source)
         except (SyntaxError, UnicodeDecodeError) as e:
             fi = _FileInfo(
@@ -250,6 +258,53 @@ class GraphBuilder:
 
         # 导入处理
         self._collect_imports(fi, tree)
+        self._files[rel_path] = fi
+
+    def _parse_file_ts(self, rel_path: str, abs_path: str, source: str, provider) -> None:
+        """多语言解析（Tree-sitter）：RawFile → _FileInfo（图结构完全复用）。"""
+        raw = provider.parse(source, rel_path)
+        fi = _FileInfo(
+            rel_path=rel_path, abs_path=abs_path, source=source,
+            tree=ast.Module(body=[]), module_path=self._module_path(rel_path),
+            error=raw.error,
+        )
+        fi.symbols.append(_Symbol(
+            kind="file", node_id=rel_path, name=os.path.basename(rel_path),
+            lineno=1, end_lineno=len(source.splitlines()) or 1,
+        ))
+        self._all_node_ids.add(rel_path)
+
+        # 符号：函数/类/方法/全局
+        for s in raw.symbols:
+            sym = _Symbol(
+                kind=s.kind, node_id=f"{rel_path}::{s.name}", name=s.name,
+                class_name=s.class_name, lineno=s.lineno, end_lineno=s.end_lineno,
+            )
+            fi.symbols.append(sym)
+            fi.symbols_by_name.setdefault(s.name, []).append(sym)
+            self._all_node_ids.add(sym.node_id)
+            if s.kind == "class":
+                fi.class_methods[sym.node_id] = list(s.methods)
+        for g in raw.globals:
+            fi.global_names.add(g.name)
+            g_sym = _Symbol(kind="global", node_id=f"{rel_path}::{g.name}",
+                            name=g.name, lineno=g.lineno, end_lineno=g.end_lineno)
+            fi.symbols.append(g_sym)
+            self._all_node_ids.add(g_sym.node_id)
+
+        # 导入（JS import/require → _ImportBinding 近似：相对路径当模块）
+        for imp in raw.imports:
+            mod = imp.module
+            local = imp.local or (imp.symbol or mod.split("/")[-1].split(".")[0])
+            if imp.kind == "symbol" and imp.symbol and imp.symbol != "default":
+                fi.imports[local] = _ImportBinding(kind="symbol", module_path=mod, symbol=imp.symbol)
+            else:
+                fi.imports[local] = _ImportBinding(kind="module", module_path=mod)
+            if mod not in fi.imported_module_paths:
+                fi.imported_module_paths.append(mod)
+
+        # 调用（名字匹配 resolve 在 _build_function_edges 处理）
+        fi.raw_calls = raw.calls
         self._files[rel_path] = fi
 
     def _function_symbol(self, fi: _FileInfo, node, class_name: Optional[str]) -> _Symbol:
@@ -334,6 +389,8 @@ class GraphBuilder:
     def _module_path(rel_path: str) -> str:
         """文件相对路径 → 模块路径。"""
         base = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+        if "." in os.path.basename(base):  # 非 py：去扩展名
+            base = base.rsplit(".", 1)[0]
         if base.endswith("__init__"):
             base = base.rsplit("/", 1)[0]
         return base.replace("/", ".")
@@ -450,6 +507,10 @@ class GraphBuilder:
 
     def _build_function_edges(self, fi: _FileInfo, sym: _Symbol) -> None:
         """函数体内的调用边 + 数据流边 + 全局引用边 + 反射标记。"""
+        # 多语言（2026-08-08）：非 Python 文件走 Tree-sitter 调用（名字匹配）
+        if fi.raw_calls:
+            self._build_ts_call_edges(fi, sym)
+            return
         func_node = self._find_function_node(fi, sym)
         if not func_node:
             return
@@ -478,6 +539,28 @@ class GraphBuilder:
             for s in fi.symbols:
                 if s.node_id == sym.node_id:
                     s.is_reflection = True
+
+    def _build_ts_call_edges(self, fi: _FileInfo, sym: _Symbol) -> None:
+        """多语言调用边：callee 名字匹配图内函数/方法/全局（MVP 名字匹配）。"""
+        calls = fi.raw_calls.get(sym.name, [])
+        if not calls:
+            return
+        for rc in calls:
+            callee = rc.callee
+            # 提取可解析名：obj.method → 先试全名，再试最后一段
+            segments = callee.split(".")
+            cands = []
+            if len(segments) > 1:
+                cands.append(".".join(segments[-2:]))  # Class.method
+            cands.append(segments[-1])                  # 裸名
+            targets = set()
+            for c in cands:
+                for other in self._files.values():
+                    for s in other.symbols:
+                        if s.kind in ("function", "global") and s.name == c:
+                            targets.add(s.node_id)
+            for tid in targets:
+                self._add_edge(sym.node_id, tid, "call")
 
     def _find_function_node(self, fi: _FileInfo, sym: _Symbol) -> Optional[ast.FunctionDef]:
         """根据符号定位 AST 节点（跳过已处理过的）。"""
