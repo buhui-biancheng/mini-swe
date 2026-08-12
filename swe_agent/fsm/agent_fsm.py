@@ -179,6 +179,7 @@ class AgentFSM:
         early_stop: bool = False,
         early_stop_patience: int = 2,
         early_stop_min_attempts: int = 3,
+        official_mode: bool = False,
     ):
         """初始化 Agent FSM。
 
@@ -210,6 +211,9 @@ class AgentFSM:
         self.early_stop_patience = max(1, early_stop_patience)
         # 免死期：前 N 次尝试不触发早停（给积累期，2026-08-08 三修①）
         self.early_stop_min_attempts = max(1, early_stop_min_attempts)
+        # 官方模式（2026-08-13）：无 test_patch，自带测试不验证 bug →
+        # 要求 LLM 用 run_command 自验证并声明，FSM 检查验证证据
+        self.official_mode = official_mode
         self.attempt_trajectory = []  # [{attempt, fail_count, token, cost}] 尝试轨迹
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
@@ -794,6 +798,26 @@ class AgentFSM:
             for node_id in targets:
                 self.graph_manager.update_dynamic_weight(node_id)
                 self.logger.jit_update(node=node_id, accepted=True, reason="success")
+            # 官方模式自验证（2026-08-13）：自带测试不验证 bug——
+            # 必须 LLM 用 run_command 执行过验证脚本，否则引导重新验证
+            if self.official_mode:
+                verified = False
+                for m in self.messages:
+                    if m.get("role") == "assistant" and m.get("tool_calls"):
+                        for tc in m["tool_calls"]:
+                            fn = tc.get("function", {})
+                            if fn.get("name") == "run_command":
+                                args = str(fn.get("arguments", ""))
+                                if "python3 -c" in args or "python3 -c" in args or "验证" in args:
+                                    verified = True
+                if not verified:
+                    self.messages.append({"role": "user", "content":
+                        "[自验证协议] 注意：仓库自带测试不验证本 bug（它们本来就通过）。"
+                        "请用 run_command 执行验证脚本（如 python3 -c \"模拟调用并打印输出\"）"
+                        "确认修复行为正确，然后再运行 run_test 确认无回归。"})
+                    self._last_test_failed = True
+                    self.test_fail()  # 引导重走 locate（LLM 看到提示后自验证）
+                    return
             self.test_pass()
         else:
             self._last_test_failed = True

@@ -96,7 +96,8 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                    mode=mode, no_degrade=no_degrade,
                    python_version="3.8", packages=REPO_DEPS[repo],
                    config=cfg, graph_level=graph_level,
-                   early_stop=False)
+                   early_stop=False,  # 2026-08-08 用户预案：评测关早停（保成功率），产品模式可开
+                   official_mode=os.environ.get("OFFICIAL") == "1")
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)
