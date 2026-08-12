@@ -51,10 +51,13 @@ def make_worktree(inst):
                        cwd=src, capture_output=True, text=True, env=PROXY_ENV, timeout=600)
     if r.returncode != 0:
         return None
-    r = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=work,
-                       input=inst["test_patch"], capture_output=True, text=True, timeout=60)
-    if r.returncode != 0:
-        return None
+    # 2026-08-13 官方模式（OFFICIAL=1）：不应用 test_patch（官方隐藏测试防泄漏），
+    # 自带测试保留（agent 可跑自带测试——真实工程师工作流）
+    if os.environ.get("OFFICIAL") != "1":
+        r = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=work,
+                           input=inst["test_patch"], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return None
     return work
 
 
@@ -75,6 +78,14 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
         test_cmd = (f"cd /workspace && {src_hint}python3 -m pytest "
                     + " ".join(f'"{t}"' for t in ftp[:6])
                     + " -q -p no:cacheprovider -c /dev/null -p pytester")
+    if os.environ.get("OFFICIAL") == "1":
+        # 官方模式：跑相关自带测试（仓库 tests/ 目录）——agent 可跑自带测试
+        test_dir = "tests"
+        for cand in ("tests", "test"):
+            if os.path.isdir(os.path.join(work, cand)):
+                test_dir = cand
+                break
+        test_cmd = f"{src_hint}python3 -m pytest {test_dir} -q -p no:cacheprovider"
     else:
         test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q -p no:cacheprovider"
     cfg = AgentConfig(thinking_enabled=True, reasoning_effort="high",
@@ -103,6 +114,18 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                        "cached": tb.cached_total}
     except Exception:
         pass
+    # 官方模式（OFFICIAL=1）：agent 自评成功后，评测阶段应用 test_patch → FTP 真实判定
+    official = os.environ.get("OFFICIAL") == "1"
+    if official and success:
+        subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=work,
+                       input=inst["test_patch"], capture_output=True, text=True, timeout=60)
+        ftp_cmd = (f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6])
+                   + " -q -p no:cacheprovider")
+        rf = run_in_docker(work, ftp_cmd, python_version="3.8",
+                           packages=REPO_DEPS[repo], timeout=900)
+        success = rf.exit_code == 0
+        ftp_detail = (rf.stdout or "")[-200:] if not success else None
+
     # PASS_TO_PASS 回归验证（官方 harness 口径，2026-08-08）：
     # FSM 成功（FTP 过）后，再跑 P2P——全过才算官方 resolve；有挂 = 引入回归
     p2p_pass = None
@@ -137,6 +160,7 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
             "graph_level": graph_level, "p2p_pass": p2p_pass,
+            "official_ftp": locals().get("ftp_detail"),
             "p2p_detail": p2p_detail,
             "cost_yuan": cost_yuan, "cost_detail": cost_detail}
 
