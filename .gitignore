@@ -142,3 +142,5 @@ third_party/
 eval/swe_bench_repos/
 eval/swe_bench_work/
 eval/src
+
+eval/swe_bench_data/eval_official_results.json
