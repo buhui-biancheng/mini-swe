@@ -155,6 +155,10 @@ class Checkpoint:
         self.snapshots.clear()
 
 
+# 2026-08-13 图上下文瘦身：L1 邻域节点上限（seed 优先 + 高 in_degree 核心枢纽）
+MAX_L1_NEIGHBOR_NODES = 30
+
+
 class AgentFSM:
     """Agent FSM: 基于有限状态机的代码修复 Agent。
 
@@ -214,6 +218,8 @@ class AgentFSM:
         # 官方模式（2026-08-13）：无 test_patch，自带测试不验证 bug →
         # 要求 LLM 用 run_command 自验证并声明，FSM 检查验证证据
         self.official_mode = official_mode
+        # 轨迹落盘（2026-08-13）：验证脚本记录 + 上下文长度统计
+        self.verification_log = []  # run_command 调用记录（参数+输出截断）
         self.attempt_trajectory = []  # [{attempt, fail_count, token, cost}] 尝试轨迹
         if sandbox:
             from swe_agent.sandbox.l1_sandbox import L1Sandbox
@@ -255,6 +261,7 @@ class AgentFSM:
             fence=self.fence,
             graph_manager=self.graph_manager,
             sandbox=self.sandbox,
+            graph_level=self.graph_level,
         )
 
         # 防死循环、快照、语法防火墙
@@ -374,9 +381,11 @@ class AgentFSM:
         if self.graph_level >= 2:
             parts.append("【图索引 L0 摘要】\n" + "\n".join(lines))
 
-        # 报错文件相关节点 L1 邻接 → 极简格式（位置化读取，省 token）
-        # 细准（小地图）：graph_level >= 1 就有（单独细准也能用）
-        if self.graph_level >= 1:
+        # 2026-08-13 用户定稿（修正）：
+        #   L1 模式（graph_level==1，只有细准）：L1 邻域注入保留（消融一档）
+        #   L2 模式（graph_level==2，完整）：细准改按需（view_file 附带清单），
+        #     注入只剩粗准 L-1+L0（≈8k/轮，比 L1 更省）
+        if self.graph_level == 1:
             self._append_l1_neighborhood(parts)
         return "\n\n".join(parts)
 
@@ -399,9 +408,12 @@ class AgentFSM:
             g = self.graph_index.graph
             nbr_nodes = sorted(
                 (g.nodes[nid] for nid in seen if nid in g.nodes),
-                key=lambda x: (x.file, x.lineno),
+                key=lambda x: (0 if x.node_id in seed_ids else 1, -x.in_degree, x.file, x.lineno),
             )
-            nbr_edges = [e for e in g.edges if e.source in seen and e.target in seen]
+            # 2026-08-13 瘦身：邻域节点上限（seed 优先 + 核心枢纽），防止邻居爆炸
+            nbr_nodes = nbr_nodes[:MAX_L1_NEIGHBOR_NODES]
+            kept = {n.node_id for n in nbr_nodes}
+            nbr_edges = [e for e in g.edges if e.source in kept and e.target in kept]
             body = [
                 "# 图索引极简格式：行首 NODE:/EDGE: 区分节点边，字段按 | 分隔固定列序",
                 "# NODE: id | file | function | lineno | in_degree | dynamic_weight | is_reflection",
@@ -470,6 +482,14 @@ class AgentFSM:
             print(f"  [TOOL] 调用 {tool_name}({json.dumps(arguments, ensure_ascii=False)})")
             result = self.registry.execute(tool_name, arguments)
             result_data = json.loads(result)
+
+            # 轨迹落盘：run_command 验证记录（官方模式自验证证据）
+            if tool_name == "run_command":
+                self.verification_log.append({
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "output_excerpt": str(result)[:400],
+                })
 
             # Watchdog 检查工具调用（传入参数做重复检测）
             if self.watchdog.record_tool(tool_name, arguments):
@@ -569,7 +589,8 @@ class AgentFSM:
         self._plain_task_msg = (
             f"请修复以下文件中的 bug：\n\n"
             f"文件：{self.bug_file}\n\n"
-            f"骨架：\n{self.skeleton_text}\n\n"
+            # 2026-08-13 用户定稿：骨架不再全量注入（9.1k/轮）——
+            # 函数级视图由 view_file 按需提供（_file_symbol_listing）
             f"修复完成后运行测试：{self._display_command()}"
         )
 

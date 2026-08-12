@@ -59,12 +59,15 @@ class ToolRegistry:
     def __init__(self, skeleton_text: str = "", code_dir: str = ".",
                  python_version: str = "3.11", packages: list[str] | None = None,
                  graph_index=None, fence=None, graph_manager=None,
-                 sandbox: bool = False):
+                 sandbox: bool = False, graph_level: int = 2):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
         self.packages = packages or ["pytest"]
         self.graph_index = graph_index  # GraphIndex（迁移后优先使用）
+        # 图按需读取（2026-08-13 用户定稿）：图不全量注入，view_file 时
+        # 附带本文件符号清单（细准按需）；graph_level>=1 才附带（消融干净）
+        self.graph_level = graph_level
         self.graph_manager = graph_manager  # Phase 5 JIT
         self.sandbox = sandbox  # Phase 6 补全用
         self.fence = fence              # PermissionFence（Phase 2 权限围栏）
@@ -187,6 +190,25 @@ class ToolRegistry:
             "start_line": 1,
             "end_line": 0,
         }
+
+    def _file_symbol_listing(self, file_path: str) -> str:
+        """本文件函数/类清单（图索引按需细准，2026-08-13）。"""
+        if self.graph_index is None or self.graph_level < 2:
+            # 2026-08-13 修正：按需清单只给 L2（L1 的细准=注入的邻域，消融干净）
+            return ""
+        try:
+            nodes = [n for n in self.graph_index.graph.nodes.values()
+                     if os.path.basename(n.file) == os.path.basename(file_path)
+                     and n.node_type.value in ("function", "class")]
+        except Exception:
+            return ""
+        if not nodes:
+            return ""
+        nodes.sort(key=lambda x: x.lineno)
+        lines = [f"# {file_path} 内符号（图索引）："]
+        for n in nodes:
+            lines.append(f"  {n.node_type.value}: {n.name} (L{n.lineno}-{n.end_lineno})")
+        return "\n".join(lines)
 
     def _read_lines(self, file_path: str, start_line: int, end_line: int,
                     label: str = "") -> dict:

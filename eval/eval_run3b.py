@@ -53,6 +53,13 @@ TOOLS = [
                                       "end_line": {"type": "integer"}},
                        "required": ["file"]}}},
     {"type": "function", "function": {
+        "name": "run_test",
+        "description": "运行仓库自带测试（pytest 容器内）。参数 file=测试文件相对路径（如 tests/test_cli.py），或 keyword=测试名关键字",
+        "parameters": {"type": "object",
+                       "properties": {"file": {"type": "string"},
+                                      "keyword": {"type": "string"}},
+                       "required": ["file"]}}},
+    {"type": "function", "function": {
         "name": "search_function",
         "description": "按名字搜索函数/类，返回候选位置",
         "parameters": {"type": "object",
@@ -72,6 +79,20 @@ def make_executor(work):
                 s = int(args.get("start_line", 1)) - 1
                 e = int(args.get("end_line", min(len(lines), s + 120)))
                 return "\n".join("%d: %s" % (i + 1, l) for i, l in enumerate(lines[s:e]))
+            if name == "run_test":
+                from swe_agent.sandbox.docker_runner import run_in_docker
+                tf = args.get("file", "")
+                kw = args.get("keyword", "")
+                cmd = "python3 -m pytest %s -q -p no:cacheprovider" % tf
+                if kw:
+                    cmd += " -k " + kw
+                r = run_in_docker(work, cmd, python_version="3.8",
+                                  packages=["pytest==6.2.5", "werkzeug==2.2.3",
+                                            "click==8.1.3", "itsdangerous==2.1.2",
+                                            "jinja2==3.1.2", "blinker==1.7.0",
+                                            "importlib_metadata==6.7.0"],
+                                  timeout=300)
+                return "exit=%d\n%s" % (r.exit_code, (r.stdout or "")[-800:])
             if name == "search_function":
                 pat = args["name"].lower()
                 hits = []
@@ -97,9 +118,22 @@ def make_executor(work):
 def ask_llm_for_patch(inst, work):
     from swe_agent.prompts.prompt_manager import PromptManager
     pm = PromptManager()
+    # 文件树
+    tree_lines = []
+    for root, dirs, files in os.walk(work):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__", "node_modules")]
+        if root[len(work):].count(os.sep) > 3:
+            continue
+        for f in sorted(files):
+            if f.endswith((".py", ".js", ".ts")):
+                tree_lines.append(os.path.join(root[len(work):].lstrip("/"), f))
+    tree_txt = "\n".join(tree_lines[:150])
+
     sys_msg = (pm.load("base.md") + "\n" + pm.load("locate.md") + "\n" + pm.load("patch.md") + "\n"
-               "[官方评测模式] 你只看到 issue 和代码仓库（没有测试）。用 view_file/search_function 自由探索，"
-               "理解 bug 后产出修复。**当你认为修复完成时**，输出 JSON（只输出 JSON，不要解释）：\n"
+               "[官方评测模式] 仓库自带测试可见可运行（run_test），但官方隐藏测试不可见。"
+               "文件树：\n" + tree_txt + "\n"
+               "流程：最多 8 次工具调用完成探索与验证（run_test 可跑自带测试确认方向），"
+               "**第 9 次回复必须输出交卷 JSON**（只输出 JSON，不要解释）：\n"
                '{"file": "相对路径", "start_line": 起始行, "end_line": 结束行, "new_code": "替换后的完整代码"}')
 
     user_msg = ("# Issue\n" + inst["problem_statement"] +
@@ -111,7 +145,7 @@ def ask_llm_for_patch(inst, work):
         messages=[{"role": "system", "content": sys_msg},
                   {"role": "user", "content": user_msg}],
         tools=TOOLS, tool_executor=make_executor(work),
-        max_rounds=15)
+        max_rounds=20)
     # chat_with_tools 返回 ("", conversation)——最终文本在最后一条 assistant 消息
     final_text = ""
     for msg in reversed(conversation):

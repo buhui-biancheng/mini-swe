@@ -179,22 +179,25 @@ class TestAgentFSM:
         assert hasattr(fsm, "test_fail")
 
     def test_graph_context_compact_format(self, sample_bug_project):
-        """图上下文用极简格式：行首 NODE:/EDGE: + 固定列序（位置化读取省 token）。"""
+        """图上下文（2026-08-13 定稿）：L1 邻域注入保留；L2 细准按需（view_file 清单）。"""
         bug_file = os.path.join(sample_bug_project, "bug.py")
-        fsm = AgentFSM(bug_file=bug_file, test_command="pytest test_bug.py -v", mode="dp")
-        text = fsm._graph_context_text()
-        assert "极简格式" in text
-        node_lines = [l for l in text.splitlines() if l.startswith("NODE: ")]
-        edge_lines = [l for l in text.splitlines() if l.startswith("EDGE: ")]
-        assert node_lines, "应有 NODE 行"
-        assert edge_lines, "应有 EDGE 行"
-        for line in node_lines:
-            assert len(line.split(" | ")) == 7, f"NODE 应为 7 列: {line!r}"
-        for line in edge_lines:
-            assert len(line.split(" | ")) == 3, f"EDGE 应为 3 列: {line!r}"
-        assert hasattr(fsm, "locate_fail")
-        assert hasattr(fsm, "patch_fail")
-        assert hasattr(fsm, "max_retries")
+        base_dir = os.path.dirname(bug_file)
+        # L1（只有细准）：邻域注入保留
+        fsm1 = AgentFSM(bug_file=bug_file, test_command="pytest test_bug.py -v",
+                        mode="dp", graph_level=1)
+        text1 = fsm1._graph_context_text()
+        assert "NODE: " in text1 and "EDGE: " in text1, "L1 模式邻域注入保留"
+        # L2（完整）：细准不注入（按需），粗准 L-1/L0 保留
+        fsm2 = AgentFSM(bug_file=bug_file, test_command="pytest test_bug.py -v",
+                        mode="dp", graph_level=2)
+        text2 = fsm2._graph_context_text()
+        assert "NODE: " not in text2 and "EDGE: " not in text2, "L2 细准不注入"
+        assert "节点数" in text2 or "文件级" in text2, "L2 粗准保留"
+        # 按需：view_file 清单只在 L2（fsm.registry 带 graph_index）
+        listing2 = fsm2.registry._file_symbol_listing(os.path.join(base_dir, "bug.py"))
+        listing1 = fsm1.registry._file_symbol_listing(os.path.join(base_dir, "bug.py"))
+        assert listing2, "L2 按需清单有内容"
+        assert not listing1, "L1 无按需清单（细准=注入）"
 
     def test_skeleton_generated(self, sample_bug_project):
         """测试骨架已生成。"""

@@ -162,6 +162,10 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
             "token_total": token_total, "tool_calls": tool_calls,
             "graph_level": graph_level, "p2p_pass": p2p_pass,
             "official_ftp": locals().get("ftp_detail"),
+            # 2026-08-13 轨迹落盘：上下文长度（最终 messages 字符数）+ 验证记录
+            "context_chars": sum(len(str(m.get("content", ""))) for m in fsm.messages
+                                 if m.get("content")),
+            "verification_log": getattr(fsm, "verification_log", None),
             "p2p_detail": p2p_detail,
             "cost_yuan": cost_yuan, "cost_detail": cost_detail}
 
