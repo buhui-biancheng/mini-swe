@@ -277,8 +277,8 @@ class ToolRegistry:
             packages=self.packages,
         )
         return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": _truncate_output(result.stdout),
+            "stderr": _truncate_output(result.stderr, 1500),
             "exit_code": result.exit_code,
         }
 
