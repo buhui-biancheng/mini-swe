@@ -20,15 +20,37 @@ OUTPUT_TRUNCATE_CHARS = 4000
 
 
 def _truncate_output(text: str, limit: int = OUTPUT_TRUNCATE_CHARS) -> str:
-    """截断工具输出：超限保留头部 1000 + 尾部 limit-1000，中间省略标记。"""
+    """智能截断工具输出（2026-08-13 边界处理）：
+    优先保留【关键段】——pytest FAILURES/ERRORS 段（失败原因=核心信号）
+    + 尾部（统计行）；其次才头尾。失败信息永不丢。
+    """
     if text is None:
         return ""
     if len(text) <= limit:
         return text
+    import re as _re
+    # 关键段：pytest 失败/错误详情（FAILURES 段/ERRORS 段/traceback）
+    key_parts = []
+    for pat in (r"={5,} FAILURES ={5,}.*?(?=\n={5,}|\Z)",
+                r"={5,} ERRORS ={5,}.*?(?=\n={5,}|\Z)",
+                r"_{5,} .*? _{5,}.*?(?=\n_{5,}|\Z)"):
+        for m in _re.finditer(pat, text, _re.S):
+            seg = m.group(0)
+            if len(seg) > 200:  # 有效失败段
+                key_parts.append(seg)
+                break
+    # 尾部（统计行：x passed, y failed）
+    tail = text[-800:]
+    if key_parts:
+        # 关键段 + 尾部，总长控制
+        joined = "\n\n".join(key_parts[:2]) + "\n\n" + tail
+        if len(joined) <= limit:
+            return joined
+        return joined[:limit // 2] + f"\n...[输出截断]...\n" + joined[-limit // 2:]
+    # 无失败段（成功输出：点点点）——保留头部+尾部
     head = limit // 4
-    tail = limit - head
     return (text[:head] + f"\n...[输出截断，省略 {len(text) - limit} 字符]...\n"
-            + text[-tail:])
+            + text[-limit + head:])
 
 
 class ToolRegistry:
