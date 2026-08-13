@@ -19,7 +19,7 @@ class AgentConfig:
 
     # FSM
     rollback_limit: int = 3          # 最大回滚次数
-    check_fail_limit: int = 3        # 连续语法检查失败阈值（触发回滚）
+    check_fail_limit: int = 8  # 2026-08-13：语法失败阈值 3→8（flash 常态出错）        # 连续语法检查失败阈值（触发回滚）
     max_steps: int = 50              # 最大步骤数
     token_budget: Optional[int] = 100000  # Token 预算（None=无上限，评测用）
 

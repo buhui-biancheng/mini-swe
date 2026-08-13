@@ -764,6 +764,9 @@ class AgentFSM:
             self.logger.rollback_triggered("syntax_error", self.bug_file)
             self._syntax_errors = syntax_errors
             self._check_fail_count += 1
+            # 2026-08-13 用户定稿修正：阈值 3→8——连续语法失败是常态
+            # （flash 写代码语法出错概率高——3 次就回滚会误杀丢成功修改）
+            # 8 次还错才是真问题（上下文错乱）→ 回滚兜底（防 patch↔check 死循环）
             if self._check_fail_count >= self.agent_config.check_fail_limit:
                 print(f"[CHECK] 连续语法失败 {self._check_fail_count} 次，触发 ROLLBACK")
                 self.check_exhausted()  # → rollback
