@@ -70,9 +70,11 @@ TRANSITIONS = [
     {"trigger": "test_pass", "source": "test", "dest": "success"},
     # 2026-08-13 提交机制：test exit 0 官方模式 → 回 patch 继续（agent 决定提交）
     {"trigger": "test_ok", "source": "test", "dest": "patch"},
-    # agent 主动提交 → 交卷
-    {"trigger": "submitted", "source": "patch", "dest": "success"},
+    # agent 主动提交 → 交卷（2026-08-13 触发源放宽，见下方 submitted 定义）
     {"trigger": "test_fail", "source": "test", "dest": "locate"},
+    # 2026-08-13 交卷触发源放宽：official 模式 submitted() 会在 locate/test 状态被调用
+    # （_run_llm_turn 内），原来只有 patch 源 → 从 locate/test/check 调会 MachineError 崩溃
+    {"trigger": "submitted", "source": ["patch", "locate", "test", "check"], "dest": "success"},
     {"trigger": "rollback", "source": "test", "dest": "rollback"},      # 代价熔断
     {"trigger": "rollback_retry", "source": "rollback", "dest": "locate"},
     {"trigger": "degrade", "source": "rollback", "dest": "locate"},     # DP → Greedy
@@ -161,10 +163,11 @@ class Checkpoint:
 
 # 2026-08-13 图上下文瘦身：L1 邻域节点上限（seed 优先 + 高 in_degree 核心枢纽）
 MAX_L1_NEIGHBOR_NODES = 30
-# 历史裁剪阈值（2026-08-13）：单次请求体超限会压垮 NAT/代理链路（大请求+长流式
-# = 连接中断 APIConnectionError 的嫌疑根因之一）；无折叠机制下历史无限累积。
-# 裁剪 = 保留 system + 最近 N 条消息（LLM 主要依赖近期上下文——行业标准做法）。
-MAX_HISTORY_CHARS = 2000000  # ~50 万 token（2026-08-13 修正：接近 1M 上限才裁，不伤长任务）
+# 历史裁剪阈值（2026-08-13 v2）：单次请求体超限会压垮 NAT/代理链路；且官方模式
+# 全量重发累积历史是 token 爆炸主因（实测 7.5M 里 7.3M 是 cache-read 的重发）。
+# 2M 字符（≈50万token）太宽——实测对话涨到 ~1.5M 字符从不裁剪。压到 80 万字符
+# （≈20万token），超限即保留 system + 首条任务 + 最近 N 条（LLM 依赖近期上下文）。
+MAX_HISTORY_CHARS = 800000
 KEEP_LAST_MESSAGES = 25
 
 
@@ -229,6 +232,11 @@ class AgentFSM:
         # 要求 LLM 用 run_command 自验证并声明，FSM 检查验证证据
         self.official_mode = official_mode
         self.problem_statement = problem_statement
+        # 2026-08-13 工具硬上限废弃（用户反馈：120 次硬上限太垃圾）——改为可配置，
+        # 默认 None=关闭；防无限试探改由 watchdog 无进展检测 + max_retries 兜底
+        self.max_tool_calls = getattr(config or AgentConfig(), "max_tool_calls", None)
+        self._verified = False  # 官方模式：是否已运行测试/验证命令（交卷前置条件）
+        self._no_edit_strikes = 0  # 官方模式：无修改就结束回合的连续次数（升级干预）
 
         # 轨迹落盘（2026-08-13）：验证脚本记录 + 上下文长度统计
         self.verification_log = []  # run_command 调用记录（参数+输出截断）
@@ -274,6 +282,7 @@ class AgentFSM:
             graph_manager=self.graph_manager,
             sandbox=self.sandbox,
             graph_level=self.graph_level,
+            block_network=self.official_mode,  # 2026-08-13 官方模式封 run_command 网络
         )
 
         # 防死循环、快照、语法防火墙
@@ -505,11 +514,14 @@ class AgentFSM:
                 fp = self._resolve_file(arguments.get("file_path", ""))
                 self.checkpoint.save_initial(fp)
 
-            # 2026-08-13 工具上限（官方模式防无限试探）：120 次后强制交卷/失败
+            # 2026-08-13 工具调用计数（修复 double-increment：原 509/567 各 +1，
+            # 120 硬上限实际 60 次真实调用就触发——假超限）
             self.tool_call_count += 1
-            if self.official_mode and self.tool_call_count > 120:
+            # 可配置安全上限（默认 None=关闭）。硬上限 120 已按用户反馈废弃，
+            # 官方模式防无限试探改由 watchdog 无进展检测 + max_retries 兜底
+            if self.max_tool_calls is not None and self.tool_call_count > self.max_tool_calls:
                 _has_edit = bool(getattr(self, "_edited_ranges", None))
-                print(f"  [LIMIT] 工具调用超限（{self.tool_call_count}）——强制{'交卷' if _has_edit else '失败'}")
+                print(f"  [LIMIT] 工具调用超限（{self.tool_call_count}/{self.max_tool_calls}）——强制{'交卷' if _has_edit else '失败'}")
                 if _has_edit:
                     self.submitted()
                     return "已交卷"
@@ -527,6 +539,13 @@ class AgentFSM:
                     "arguments": arguments,
                     "output_excerpt": str(result)[:400],
                 })
+            # 官方模式验证证据：run_test 或 python/pytest 类 run_command = 已自验证
+            if tool_name == "run_test":
+                self._verified = True
+            elif tool_name == "run_command":
+                _cmd = str(arguments.get("command", ""))
+                if "python" in _cmd or "pytest" in _cmd:
+                    self._verified = True
 
             # Watchdog 检查工具调用（传入参数做重复检测）
             if self.watchdog.record_tool(tool_name, arguments):
@@ -540,15 +559,16 @@ class AgentFSM:
                 file_path = arguments.get("file_path", "")
                 self.watchdog.record_edit(file_path, is_success)
                 if is_success:
+                    self._no_edit_strikes = 0  # 开始修改后，重置无修改升级计数
                     self._edited_ranges.append((
                         self._resolve_file(file_path),
-                        int(arguments.get("start_line", 1)),
-                        int(arguments.get("end_line", 1)),
+                        int(result_data.get("start_line", 1)),
+                        int(result_data.get("end_line", 1)),
                     ))
                     # Phase 4 机制二：认知保持（记录修改历史，回退时注入）
                     self._cognition_history.append(
-                        f"{os.path.basename(file_path)}:{arguments.get('start_line', 1)}"
-                        f"-{arguments.get('end_line', 1)} 编辑")
+                        f"{os.path.basename(file_path)}:{result_data.get('start_line', 1)}"
+                        f"-{result_data.get('end_line', 1)} 编辑")
 
             # 追踪无进展
             stuck, reason = self.watchdog.check_stuck()
@@ -564,7 +584,6 @@ class AgentFSM:
             else:
                 print(f"  [TOOL] 成功")
 
-            self.tool_call_count += 1
             return result
 
         messages = self._build_messages()
@@ -603,14 +622,37 @@ class AgentFSM:
             if not _last.get("tool_calls") and _last.get("role") == "assistant":
                 _has_edit = bool(getattr(self, "_edited_ranges", None))
                 if _has_edit:
-                    print("  [DONE] agent 无工具调用回复——视为完成，交卷")
-                    self.submitted()  # patch → success
+                    if not getattr(self, "_verified", False):
+                        # 有修改但没验证 → 不交卷，先要求验证（自评可靠性围栏）
+                        self.messages.append({"role": "user", "content":
+                            "[系统] 你已经修改了代码，但还没有运行任何验证。交卷前请先运行 "
+                            "run_test（或用 run_command 运行 python/pytest）确认修改可运行。"})
+                        print("  [DONE-未验证] 有修改但未验证——要求先跑测试")
+                        return "继续"
+                    print("  [DONE] agent 无工具调用回复 + 已验证——交卷")
+                    self.submitted()  # → success
                     return "已交卷"
-                # 无修改就结束 → 提示继续（必须 edit）
-                self.messages.append({"role": "user", "content":
-                    "[提示] 你还未修改任何代码。请继续：分析问题描述→view_file 定位→"
-                    "edit_function 修改→run_test 验证。不要直接结束。"})
-                print("  [DONE-但无修改] 无工具调用但未 edit——提示继续")
+                # 无修改就结束 → 升级干预（flash 不主动 edit 的核心对策）：
+                # 第1/2次 nudge，第3次强指令，第4次判失败（不给 watchdog 5 次 locate 抢杀）
+                self._no_edit_strikes += 1
+                _strike = self._no_edit_strikes
+                if _strike >= 4:
+                    self.messages.append({"role": "user", "content":
+                        "[系统] 你多次未修改任何代码，本次尝试结束（无进展）。"})
+                    print("  [DONE-但无修改] 连续无修改达上限——判失败")
+                    self.cancel(reason=CancelReason.NO_PROGRESS)
+                    return "失败"
+                if _strike >= 3:
+                    _msg = ("[强制] 最后一次机会：请立即用 edit_function 修改 bug 文件"
+                            "（任务开头给出的文件路径）实现修复。本回合若不修改，将直接失败。")
+                elif _strike >= 2:
+                    _msg = ("[警告] 你第二次未修改代码就结束回合。只读不写不会成功。"
+                            "请立即用 edit_function 修改 bug 文件（任务开头给出的文件路径）。")
+                else:
+                    _msg = ("[提示] 你还未修改任何代码。任务开头给出了 bug 文件路径——"
+                            "请用 edit_function 修改该文件代码修复问题，再用 run_test 验证。不要直接结束。")
+                self.messages.append({"role": "user", "content": _msg})
+                print(f"  [DONE-但无修改] 无工具调用但未 edit（第 {_strike} 次）——提示继续")
                 return "继续"
         return final_response
 
@@ -656,6 +698,16 @@ class AgentFSM:
             if fence_text:
                 user_content += f"\n\n{fence_text}"
 
+        # 2026-08-13 官方模式：初始即强化"必须 edit + 离线"契约（flash 不主动 edit 的对策）
+        if self.official_mode:
+            user_content += ("\n\n【官方模式要求（必须遵守）】\n"
+                "1. 必须用 edit_function 实际修改 bug 文件（任务开头给出的文件路径）才能解决问题；\n"
+                "   只读文件 / 只跑命令 / 从不修改 = 失败。\n"
+                "2. 修改后用 run_test 验证你的改动。\n"
+                "3. 严禁联网或读取仓库之外的内容——这是严格离线任务，外部代码对你无用。\n"
+                "4. 行动偏向：信息够了就动手，不要反复确认；给具体修复方案而不是罗列选项。\n"
+                "5. edit_function 推荐用 old_string→new_string 精确替换（无需行号），改起来最快。")
+
         self._initial_task_msg = user_content
         self.messages = [{"role": "user", "content": user_content}]
         self._last_test_failed = False
@@ -672,6 +724,8 @@ class AgentFSM:
         # Phase 4 机制四：任务开始时记录初始权重（失败/取消时回退到它）
         self._initial_weights = self.graph_manager.get_weights_snapshot()
         self.tool_call_count = 0
+        self._verified = False
+        self._no_edit_strikes = 0
         self._syntax_errors = []
         self._log_state_enter("init", self.attempt)
 
@@ -846,6 +900,18 @@ class AgentFSM:
         print(f"\n[TEST] 运行测试: {container_command}")
         self._log_state_enter("test", self.attempt)
 
+        # 2026-08-13 官方模式：尚未编辑任何代码 → 跳过 Docker 测试运行（打破空转循环）。
+        # 原空转：locate→patch→check→test(无修改)→"确认交卷"→无工具回复→nudge→test_ok→
+        #   又跑全量测试…每轮烧 30-60s Docker 且无任何新信息——硬上限 120 就是为它兜底的
+        if self.official_mode and not self._edited_ranges:
+            print("[TEST] 官方模式：尚未编辑任何代码，跳过测试运行")
+            self.messages.append({"role": "user", "content":
+                "[系统] 你还没有修改任何业务代码。请先定位问题（search_function / view_file），"
+                "再用 edit_function 实施修改，最后运行测试验证。不要在没有修改时反复进入验证。"})
+            self._last_test_failed = False
+            self.test_fail()  # → locate（干净新起点，不注入失败上下文）
+            return
+
         from swe_agent.sandbox.docker_runner import run_in_docker
         # 2026-08-08：传 python_version/packages（评测环境注入），network=False 保持沙盒断网
         test_result = run_in_docker(
@@ -879,15 +945,24 @@ class AgentFSM:
             # 2026-08-13 最简交卷：test exit 0 → test 状态内调 LLM 工具循环
             # （agent 继续分析/修改——无工具调用回复=交卷；patch 过渡不调 LLM——死循环修复）
             if self.official_mode:
+                _edits_before = len(self._edited_ranges)
                 self.messages.append({"role": "user", "content":
-                    "[测试反馈] 测试通过（当前代码状态）。你已经修改了代码且测试通过。"
-                    "现在请做最终判断：对照【问题描述】——如果你认为问题已修复，"
-                    "【直接回复：我已完成修复】即可交卷（不需要再调用任何工具）；"
-                    "如果你认为还没修好，继续修改。"})
+                    "[测试反馈] 现有测试全部通过（无回归）。注意：现有测试通过 ≠ 问题一定已修复"
+                    "（问题可能未被现有测试覆盖）。请对照【问题描述】做最终判断："
+                    "若你认为问题已真正修复，直接回复『我已完成修复』即可交卷；"
+                    "若还需修改，继续调用工具。"})
                 _final = self._run_llm_turn()  # agent 继续工具循环（或交卷）
                 if self.state in ("fail", "success"):
                     return
-                self.test_ok()  # → patch（过渡）→ check → test
+                if len(self._edited_ranges) > _edits_before:
+                    self.test_ok()  # 有新修改 → 再验一轮
+                else:
+                    # 没改也没交卷 → 不空转再跑测试，回定位重来
+                    self.messages.append({"role": "user", "content":
+                        "[系统] 你既未修改也未交卷。请二选一：用 edit_function 实际修改，"
+                        "或直接回复『我已完成修复』。"})
+                    self._last_test_failed = False
+                    self.test_fail()  # → locate
                 return
             self.test_pass()
         else:

@@ -23,11 +23,16 @@ class ViewFileArgs(BaseModel):
 
 
 class EditFunctionArgs(BaseModel):
-    """编辑文件中的指定行范围。"""
+    """编辑文件（两种模式二选一）：
+    模式A（推荐，低摩擦）：old_string→new_string 精确替换，无需行号（new_string 缺省=删除）
+    模式B：start_line + end_line + new_code 按行范围替换（精确行号）
+    """
     file_path: str = Field(description="要编辑的文件路径")
-    start_line: int = Field(description="起始行号（从 1 开始）")
-    end_line: int = Field(description="结束行号（包含）")
-    new_code: str = Field(description="替换的新代码")
+    old_string: Optional[str] = Field(description="模式A：要替换的原文（必须精确匹配文件中内容）", default=None)
+    new_string: Optional[str] = Field(description="模式A：替换成的新文本（缺省表示删除 old_string）", default=None)
+    start_line: Optional[int] = Field(description="模式B：起始行号（从 1 开始）", default=None)
+    end_line: Optional[int] = Field(description="模式B：结束行号（包含）", default=None)
+    new_code: Optional[str] = Field(description="模式B：替换的新代码", default=None)
 
 
 class RunTestArgs(BaseModel):
@@ -103,7 +108,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "edit_function",
-            "description": "编辑文件中的指定行范围，用新代码替换",
+            "description": "编辑文件中的代码。推荐用模式A：old_string（要替换的原文，必须精确匹配）+ new_string（新文本）精确替换，无需行号；也可用模式B：start_line+end_line+new_code 按行范围替换",
             "parameters": EditFunctionArgs.model_json_schema(),
         },
     },

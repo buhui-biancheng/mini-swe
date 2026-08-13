@@ -170,18 +170,18 @@ class DecisionEngine:
         return False
 
     def record_state_entry(self, state: str) -> bool:
-        # 2026-08-13：test→patch→test 是正常流（官方模式）——状态检测不拦 test
-        if state == "test":
-            return False
-        """记录状态进入，返回 True 表示检测到异常。"""
+        """记录状态进入，返回 True 表示检测到异常。
+
+        2026-08-13 修复逻辑缺陷：原实现只记录 locate/test（且 test 直接跳过不记），
+        导致 state_entry_history 里全是 "locate"——"最近 N 次进入同一状态"必然误触发，
+        官方模式无编辑回环（locate→patch→check→test→locate）被误杀。
+        现在记录所有状态；真正的死循环（同一状态连续 6 次）才会触发。
+        """
         self.state_entry_history.append(state)
-
-        # 检测：最近 5 次进入同一状态
-        if len(self.state_entry_history) >= 5:
-            last5 = list(self.state_entry_history)[-5:]
-            if len(set(last5)) == 1 and last5[0] == state:
+        if len(self.state_entry_history) >= 6:
+            last6 = list(self.state_entry_history)[-6:]
+            if len(set(last6)) == 1 and last6[0] == state:
                 return True
-
         return False
 
     def record_edit(self, file_path: str, success: bool) -> None:
@@ -190,6 +190,8 @@ class DecisionEngine:
         if success:
             self.successful_edits += 1
             self.rounds_without_edit = 0
+            # 2026-08-13：编辑成功 = 有实质进展，重置状态循环检测（避免历史误判卡死）
+            self.state_entry_history.clear()
         else:
             self.rounds_without_edit += 1
 

@@ -59,7 +59,8 @@ class ToolRegistry:
     def __init__(self, skeleton_text: str = "", code_dir: str = ".",
                  python_version: str = "3.11", packages: list[str] | None = None,
                  graph_index=None, fence=None, graph_manager=None,
-                 sandbox: bool = False, graph_level: int = 2):
+                 sandbox: bool = False, graph_level: int = 2,
+                 block_network: bool = False):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
@@ -71,6 +72,9 @@ class ToolRegistry:
         self.graph_manager = graph_manager  # Phase 5 JIT
         self.sandbox = sandbox  # Phase 6 补全用
         self.fence = fence              # PermissionFence（Phase 2 权限围栏）
+        # 2026-08-13 官方模式网络防火墙：run_command 是宿主机 shell，
+        # 不拦会成作弊通道（curl 下载上游题解）。block_network=True 时禁网络命令。
+        self.block_network = block_network
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
             "view_file": self._view_file,
@@ -259,7 +263,8 @@ class ToolRegistry:
             return {"error": "JIT 补全不可用：无 GraphManager"}
         return self.graph_manager.apply_jit_update(node_id, target, edge_type, evidence)
 
-    def _edit_function(self, file_path: str, start_line: int, end_line: int, new_code: str) -> dict:
+    def _edit_function(self, file_path: str, old_string: str = None, new_string: str = None,
+                       start_line: int = None, end_line: int = None, new_code: str = None) -> dict:
         # 2026-08-13 围栏：禁止修改测试文件（官方模式防自证陷阱——改测试获假信心）
         _rp = os.path.basename(file_path)
         _d = os.path.basename(os.path.dirname(file_path))
@@ -279,25 +284,52 @@ class ToolRegistry:
         if not os.path.exists(abs_path):
             abs_path = os.path.join(self.code_dir, file_path)
         if not os.path.exists(abs_path):
-            # 尝试在 code_dir 下查找
             for root, dirs, files in os.walk(self.code_dir):
                 if os.path.basename(file_path) in files:
                     abs_path = os.path.join(root, os.path.basename(file_path))
                     break
+        if not os.path.exists(abs_path):
+            return {"error": f"文件不存在: {file_path}"}
 
         with open(abs_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            text = f.read()
 
+        # 模式A：old_string → new_string 精确替换（低摩擦，无需行号）
+        if old_string is not None:
+            if old_string not in text:
+                # 帮助定位：给出"去除空白差异"的模糊提示
+                import re as _re
+                norm = _re.sub(r"\s+", " ", old_string).strip()
+                return {"error": f"old_string 未在文件中找到。请复制文件中的精确文本（含缩进）。"
+                                f"（模糊匹配尝试: {norm[:60]}...）"}
+            idx = text.index(old_string)
+            prefix = text[:idx]
+            act_start = prefix.count("\n") + 1
+            act_end = act_start + old_string.count("\n")
+            text = text[:idx] + (new_string or "") + text[idx + len(old_string):]
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            result = {"success": True, "file": file_path, "lines_edited": f"{act_start}-{act_end}",
+                      "start_line": act_start, "end_line": act_end, "mode": "old_string"}
+            if fence_warnings:
+                result["warning"] = "；".join(fence_warnings)
+                result["penalty"] = fence_penalty
+            return result
+
+        # 模式B：start_line/end_line 行范围替换
+        if start_line is None or end_line is None or new_code is None:
+            return {"error": "请二选一：模式A 提供 old_string+new_string；模式B 提供 start_line+end_line+new_code"}
+        lines = text.splitlines(keepends=True)
         if start_line < 1 or end_line > len(lines) or start_line > end_line:
             return {"error": f"行号范围无效: {start_line}-{end_line}，文件共 {len(lines)} 行"}
 
         new_lines = new_code if new_code.endswith("\n") else new_code + "\n"
         lines[start_line - 1 : end_line] = [new_lines]
-
         with open(abs_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
-        result = {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}"}
+        result = {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}",
+                  "start_line": start_line, "end_line": end_line, "mode": "line_range"}
         if fence_warnings:
             result["warning"] = "；".join(fence_warnings)
             result["penalty"] = fence_penalty
@@ -349,6 +381,25 @@ class ToolRegistry:
             for d in dangerous:
                 if d in command.lower():
                     return {"error": f"危险命令被禁止: {command}"}
+
+            # 2026-08-13 官方模式网络防火墙：run_command 在宿主机执行（有网），
+            # 不拦就是作弊通道（实测 agent curl 下载上游 cli.py + 查 GitHub PR）。
+            # 禁网络工具类命令——官方模式必须只基于本地仓库求解。
+            if self.block_network:
+                _net = ["curl", "wget", "pip install", "pip3 install",
+                        "pip download", "pip3 download", "git clone",
+                        "git fetch", "git pull", "git remote", "http://", "https://",
+                        "api.github", "raw.githubusercontent", "patch-diff",
+                        "urllib.request", "requests.get",
+                        # 2026-08-13 堵 git 历史/tag 泄漏：本地仓库有全部 tag，
+                        # git show <tag>:file 能直接读出未来版本实现（实测 agent 用过）
+                        "git show", "git log", "git tag", "git branch",
+                        "git rev-list", "git ls-remote", "git describe", "git blame",
+                        "HEAD~", "^HEAD"]
+                if any(k in command.lower() for k in _net):
+                    return {"error": "网络命令被禁止（官方模式离线）——请只使用本地仓库代码推理，"
+                                    "不要尝试联网获取外部代码",
+                            "stdout": "", "stderr": "network blocked", "exit_code": -1}
 
             # 执行命令
             result = subprocess.run(

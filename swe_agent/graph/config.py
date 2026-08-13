@@ -22,6 +22,7 @@ class AgentConfig:
     check_fail_limit: int = 8  # 2026-08-13：语法失败阈值 3→8（flash 常态出错）        # 连续语法检查失败阈值（触发回滚）
     max_steps: int = 50              # 最大步骤数
     token_budget: Optional[int] = 100000  # Token 预算（None=无上限，评测用）
+    max_tool_calls: Optional[int] = None  # 2026-08-13 工具调用硬上限（None=关闭；原 120 硬编码已废弃）
 
     # 权限围栏（Phase 2 模块 B）
     fence_penalty: float = 2.0       # 高影响文件的影响面代价惩罚乘数

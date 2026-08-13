@@ -14,6 +14,7 @@ class CancelReason:
     API_ERROR = "api_error"
     BUDGET_EXCEEDED = "token_budget_exceeded"
     FATAL = "fatal_error"
+    NO_PROGRESS = "no_progress"
 
 
 def handle_cancel(fsm, reason: str = CancelReason.USER) -> None:
