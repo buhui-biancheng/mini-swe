@@ -505,6 +505,17 @@ class AgentFSM:
                 fp = self._resolve_file(arguments.get("file_path", ""))
                 self.checkpoint.save_initial(fp)
 
+            # 2026-08-13 工具上限（官方模式防无限试探）：120 次后强制交卷/失败
+            self.tool_call_count += 1
+            if self.official_mode and self.tool_call_count > 120:
+                _has_edit = bool(getattr(self, "_edited_ranges", None))
+                print(f"  [LIMIT] 工具调用超限（{self.tool_call_count}）——强制{'交卷' if _has_edit else '失败'}")
+                if _has_edit:
+                    self.submitted()
+                    return "已交卷"
+                self.cancel(reason=CancelReason.API_ERROR)
+                return "失败"
+
             print(f"  [TOOL] 调用 {tool_name}({json.dumps(arguments, ensure_ascii=False)})")
             result = self.registry.execute(tool_name, arguments)
             result_data = json.loads(result)
@@ -866,9 +877,10 @@ class AgentFSM:
             # （agent 继续分析/修改——无工具调用回复=交卷；patch 过渡不调 LLM——死循环修复）
             if self.official_mode:
                 self.messages.append({"role": "user", "content":
-                    "[测试反馈] 测试通过（当前代码状态）。注意：测试通过不等于问题已修复——"
-                    "请对照【问题描述】判断：① 问题已解决 → 回复说明完成即可结束；"
-                    "② 问题未解决 → 继续分析并修改代码。"})
+                    "[测试反馈] 测试通过（当前代码状态）。你已经修改了代码且测试通过。"
+                    "现在请做最终判断：对照【问题描述】——如果你认为问题已修复，"
+                    "【直接回复：我已完成修复】即可交卷（不需要再调用任何工具）；"
+                    "如果你认为还没修好，继续修改。"})
                 _final = self._run_llm_turn()  # agent 继续工具循环（或交卷）
                 if self.state in ("fail", "success"):
                     return

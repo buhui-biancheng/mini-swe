@@ -260,6 +260,12 @@ class ToolRegistry:
         return self.graph_manager.apply_jit_update(node_id, target, edge_type, evidence)
 
     def _edit_function(self, file_path: str, start_line: int, end_line: int, new_code: str) -> dict:
+        # 2026-08-13 围栏：禁止修改测试文件（官方模式防自证陷阱——改测试获假信心）
+        _rp = os.path.basename(file_path)
+        _d = os.path.basename(os.path.dirname(file_path))
+        if _d in ("tests", "test", "testing") or _rp.startswith("test_"):
+            return {"error": "不允许修改测试文件（tests/ 目录只读——你的修改只能针对业务代码）",
+                    "stdout": "", "stderr": "测试文件禁止修改", "exit_code": -1}
         # 围栏软约束：警告 + 代价惩罚，不拦截（bug 所在文件必须能修）
         fence_warnings = []
         fence_penalty = 1.0

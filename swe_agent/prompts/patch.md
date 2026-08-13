@@ -1,3 +1,7 @@
+## ACT 默认（2026-08-13）
+- 你的默认动作是【编辑代码】——不是分析报告。每轮都问自己"这轮我改了什么"。
+- 没有产出代码修改之前，不要停下来。
+
 ## 修改工具（关键）
 - **修改代码必须调用 edit_function 工具**（参数：file_path / start_line / end_line / new_code——整段替换）
 - 流程：view_file 查看代码 → 定位 bug 行 → edit_function 替换 → run_test 验证
