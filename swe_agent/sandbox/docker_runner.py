@@ -30,6 +30,98 @@ DANGEROUS_COMMANDS = [
 ]
 
 
+# ========== 容器复用池（2026-08-13）：常驻容器 + exec——省容器启动 + 减少 docker 操作 ==========
+import threading as _threading
+_CONTAINER_POOL: dict = {}
+_POOL_LOCK = _threading.Lock()
+_DOCKER_CLIENT = None
+
+
+def _get_docker_client():
+    """缓存 docker client（2026-08-13：版本探测只一次——评测中重复 from_env 曾触发
+    'maximum recursion depth exceeded'）。"""
+    global _DOCKER_CLIENT
+    if _DOCKER_CLIENT is None:
+        import docker as _docker
+        _DOCKER_CLIENT = _docker.from_env()
+    return _DOCKER_CLIENT
+
+
+def _pool_cleanup():
+    """进程退出时清理常驻容器（2026-08-13：堆积会导致 daemon 过载递归超限）。"""
+    for _cid in list(_CONTAINER_POOL.values()):
+        try:
+            _cid.remove(force=True)
+        except Exception:
+            pass
+    _CONTAINER_POOL.clear()
+
+
+import atexit as _atexit
+_atexit.register(_pool_cleanup)
+
+
+def _pool_get(image: str, code_dir: str, network: bool, links, timeout: int):
+    """获取（或创建）常驻容器——exec 模式复用。"""
+    _client = _get_docker_client()
+    key = (image, os.path.abspath(code_dir))
+    with _POOL_LOCK:
+        c = _CONTAINER_POOL.get(key)
+        if c is not None:
+            try:
+                c.reload()
+                if c.status == "running":
+                    return c
+            except Exception:
+                pass
+        container = _client.containers.run(
+            image=image,
+            command=["sleep", "infinity"],
+            volumes={os.path.abspath(code_dir): {"bind": "/workspace", "mode": "ro"}},
+            working_dir="/workspace",
+            mem_limit="1g",
+            network_disabled=not network,
+            links=[tuple(lnk.split(":", 1)) for lnk in (links or [])] or None,
+            read_only=True,
+            privileged=False,
+            tmpfs={"/tmp": "size=200m"},
+            detach=True,
+            stderr=True,
+            stdout=True,
+        )
+        _CONTAINER_POOL[key] = container
+        return container
+
+
+def _pool_exec(container, command: str, timeout: int):
+    """exec 跑命令（线程超时——SDK exec_run 无 timeout）。超时 → 容器重建。"""
+    import docker as _docker
+    result = {}
+
+    def _run():
+        try:
+            res = container.exec_run(["sh", "-c", command], workdir="/workspace")
+            result["exit"] = res.exit_code
+            out = res.output
+            result["out"] = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else str(out)
+        except Exception as e:
+            result["err"] = str(e)
+
+    _th = _threading.Thread(target=_run, daemon=True)
+    _th.start()
+    _th.join(timeout)
+    if _th.is_alive():
+        try:
+            container.remove(force=True)
+            _CONTAINER_POOL.pop(next((k for k, v in _CONTAINER_POOL.items() if v.id == container.id), None), None)
+        except Exception:
+            pass
+        return ExecutionResult(stdout="", stderr="容器执行超时（容器已重建）", exit_code=-1)
+    if "err" in result:
+        return ExecutionResult(stdout="", stderr=result["err"], exit_code=-1)
+    return ExecutionResult(stdout=result.get("out", ""), stderr="", exit_code=result.get("exit", -1))
+
+
 def is_dangerous_command(command: str) -> bool:
     cmd_lower = command.lower().strip()
     for pattern in DANGEROUS_COMMANDS:
@@ -91,7 +183,7 @@ def ensure_image(
     if packages is None:
         packages = ["pytest"]
 
-    client = docker.from_env()
+    client = _get_docker_client()
 
     # 策略 1：指定了版本 → 直接用
     if python_version is not None:
@@ -151,6 +243,7 @@ def run_in_docker(
     timeout: int = 60,
     network: bool = False,
     links: Optional[list] = None,
+    reuse: bool = False,
 ) -> ExecutionResult:
     """在隔离的 Docker 容器中执行命令。
 
@@ -183,7 +276,15 @@ def run_in_docker(
     if image is None:
         image = ensure_image(python_version, packages)
 
-    client = docker.from_env()
+    client = _get_docker_client()
+
+    # 2026-08-13 容器复用：常驻容器 + exec（省启动 + 少 docker 操作）
+    if reuse:
+        try:
+            _c = _pool_get(image, code_dir, network, links, timeout)
+            return _pool_exec(_c, command, timeout)
+        except Exception as _e:
+            return ExecutionResult(stdout="", stderr=f"容器复用失败（回退新建）: {_e}", exit_code=-1)
 
     try:
         container = client.containers.run(

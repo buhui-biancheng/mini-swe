@@ -43,10 +43,24 @@ class LLMClient:
         if not self.api_key:
             raise ValueError("未设置 DEEPSEEK_API_KEY，请在环境变量或 .env 文件中配置")
 
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-        )
+        # 2026-08-13：LLM 调用走 Clash 代理（VM→宿主机 NAT 网关）——
+        # 直连 api.deepseek.com 凌晨不稳（评测 4 次 APIConnectionError 嫌疑）
+        try:
+            import httpx
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=10.0),
+                # 2026-08-13 显式 Timeout：SDK timeout 参数未覆盖 read——挂起 19 分钟教训
+                http_client=httpx.Client(proxy="http://10.0.2.2:7897",
+                                         timeout=httpx.Timeout(connect=15.0, read=120.0,
+                                                               write=30.0, pool=10.0)),
+            )
+        except Exception:
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
 
     def chat(
         self,
@@ -97,7 +111,7 @@ class LLMClient:
         if stream:
             return self._handle_stream(kwargs, on_token, on_reasoning_token)
 
-        response = self._create_with_retry(kwargs)
+        response = self._call_with_hard_timeout(kwargs)
 
         choice = response.choices[0]
         message = choice.message
@@ -148,7 +162,37 @@ class LLMClient:
         except Exception:
             pass
 
-    def _create_with_retry(self, kwargs: dict[str, Any], max_retries: int = 4):
+    def _call_with_hard_timeout(self, kwargs: dict[str, Any], timeout: float = 150.0):
+        """SIGALRM 硬超时（2026-08-13 v2）：静默挂起（服务端慢速流式/半开连接
+        SDK 不报错）→ timeout 秒后信号中断 → AgentAPIError（可重试）。
+        异常类型天然保留（4xx/5xx 区分不受影响）——替代子进程方案（pickle 问题）。"""
+        import signal as _sig
+
+        def _handler(sig, frame):
+            raise AgentAPIError(f"LLM 调用硬超时（{timeout}s 静默挂起被终止）")
+
+        _old = _sig.signal(_sig.SIGALRM, _handler)
+        _sig.alarm(int(timeout))
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        finally:
+            _sig.alarm(0)
+            _sig.signal(_sig.SIGALRM, _old)
+
+
+    def _create_with_self_heal(self, kwargs: dict[str, Any], max_retries: int = 8):
+        """自愈包装（2026-08-13）：_create_with_retry 全失败后——断连窗口可能持续
+        4-10 分钟（评测实测）。每 90s 重试整轮，最多 4 轮——窗口终会过去。"""
+        import time as _t
+        for _round in range(4):
+            try:
+                return self._create_with_retry(kwargs, max_retries=max_retries)
+            except AgentAPIError as _e:
+                print(f"  [SELF-HEAL] 第 {_round + 1}/4 轮等待 90s 后重试整轮...")
+                _t.sleep(90)
+        raise AgentAPIError(f"LLM API 持续失败（自愈 4 轮后仍不可用）")
+
+    def _create_with_retry(self, kwargs: dict[str, Any], max_retries: int = 8):  # 2026-08-13：凌晨 API 波动，4→8
         """包裹 API 调用，指数退避重试。
 
         - 429 / 超时 / 连接错误 → 重试（退避 2^n 秒）
@@ -158,11 +202,21 @@ class LLMClient:
         last_exc: Optional[Exception] = None
         for attempt in range(max_retries):
             try:
-                return self.client.chat.completions.create(**kwargs)
-            except (RateLimitError, APITimeoutError, APIConnectionError) as e:
+                # 2026-08-13：单次调用走子进程硬超时（挂起 150s 必杀）——重试在循环里
+                return self._call_with_hard_timeout(kwargs)
+            except (RateLimitError, APITimeoutError, APIConnectionError, AgentAPIError) as e:
                 last_exc = e
+                # 2026-08-13 修复：连接错误 → 重建 client（新连接池）。
+                # 根因：VM NAT 链路空闲回收连接，SDK 复用失效连接 → 持续 APIConnectionError
+                if isinstance(e, APIConnectionError):
+                    try:
+                        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                    except Exception:
+                        pass  # 测试环境/mock：重建失败保持原 client
                 wait = 2 ** attempt
-                print(f"  [RETRY] LLM API 错误，{wait}秒后重试 ({attempt + 1}/{max_retries}): {type(e).__name__}")
+                print(f"  [RETRY] LLM API 错误，{wait}秒后重试 ({attempt + 1}/{max_retries}): "
+                      f"{type(e).__name__}: {str(e)[:150]} | 原始: {type(e.__cause__).__name__ if e.__cause__ else '无'}: "
+                      f"{str(e.__cause__)[:150] if e.__cause__ else ''}")
                 time.sleep(wait)
             except APIStatusError as e:
                 if e.status_code >= 500:
@@ -196,7 +250,7 @@ class LLMClient:
         usage = {}
         reasoning_content = ""
 
-        response = self._create_with_retry(kwargs)
+        response = self._call_with_hard_timeout(kwargs)
 
         for chunk in response:
             if not chunk.choices:

@@ -1,3 +1,9 @@
+## 修改工具（关键）
+- **修改代码必须调用 edit_function 工具**（参数：file_path / start_line / end_line / new_code——整段替换）
+- 流程：view_file 查看代码 → 定位 bug 行 → edit_function 替换 → run_test 验证
+- 注意：search_function / view_file / run_test / run_command 都不能修改代码——只有 edit_function 能改
+- 你的目标：用 edit_function 修改代码实现修复，然后提交
+
 [修复策略]
 动手前先做【范围评估】（关键第一步）：
 1. 判断这是【局部修复】还是【功能变更】：

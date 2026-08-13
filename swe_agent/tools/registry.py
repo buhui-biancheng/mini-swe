@@ -319,6 +319,7 @@ class ToolRegistry:
             container_command,
             python_version=self.python_version,
             packages=self.packages,
+            reuse=True,  # 2026-08-13 容器复用
         )
         return {
             "stdout": _truncate_output(result.stdout),
@@ -337,7 +338,7 @@ class ToolRegistry:
             if self.sandbox:
                 from swe_agent.sandbox.docker_runner import run_in_docker
                 r = run_in_docker(self.code_dir, command, timeout=60)
-                return {"stdout": _truncate_output(r.stdout), "stderr": _truncate_output(r.stderr, 1500),
+                return {"stdout": _truncate_output(r.stdout, 8000), "stderr": _truncate_output(r.stderr, 1500),
                         "exit_code": r.exit_code}
             for d in dangerous:
                 if d in command.lower():

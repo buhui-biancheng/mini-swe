@@ -8,6 +8,8 @@ import time
 import shutil
 
 sys.path.insert(0, "/home/yuanyin292/桌面/xiangmu1")
+import sys as _sys
+_sys.setrecursionlimit(20000)  # 2026-08-13：docker SDK 版本探测递归（外层栈深时超限）
 
 from swe_agent.fsm.agent_fsm import AgentFSM
 from swe_agent.sandbox.docker_runner import run_in_docker
@@ -21,7 +23,7 @@ REPO_DIR = {"pallets/flask": "flask", "pylint-dev/pylint": "pylint",
             "pytest-dev/pytest": "pytest", "psf/requests": "requests"}
 REPO_DEPS = {
     "psf/requests": ["pytest==6.2.5", "urllib3==1.26.18", "idna==2.10", "certifi", "charset_normalizer==2.1.1", "PySocks"],
-    "pallets/flask": ["pytest==6.2.5", "werkzeug==2.2.3", "jinja2==3.1.2", "click==8.1.7", "itsdangerous==2.1.2", "MarkupSafe==2.1.3", "blinker==1.7.0", "importlib_metadata==6.7.0"],
+    "pallets/flask": ["pytest==6.2.5", "werkzeug==2.2.3", "jinja2==3.1.2", "click==8.1.7", "itsdangerous==2.1.2", "MarkupSafe==2.1.3", "blinker==1.7.0", "importlib_metadata==6.7.0", "python-dotenv==1.0.0"],  # 2026-08-13：P2P 的 dotenv 测试缺依赖
     "pylint-dev/pylint": ["pytest==6.2.5", "astroid==2.15.8", "isort==5.12.0", "mccabe==0.7.0", "toml"],
     "pytest-dev/pytest": ["pytest==6.2.5", "pluggy==1.0.0", "iniconfig", "packaging", "py==1.11.0", "attrs==22.2.0"],
 }
@@ -79,13 +81,22 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                     + " ".join(f'"{t}"' for t in ftp[:6])
                     + " -q -p no:cacheprovider -c /dev/null -p pytester")
     if os.environ.get("OFFICIAL") == "1":
-        # 官方模式：跑相关自带测试（仓库 tests/ 目录）——agent 可跑自带测试
+        # 官方模式（2026-08-13 优化）：只跑相关测试文件（bug 文件同名 test_*.py）
+        # 全量 tests/ 500+ 测试每轮 30-60s——拖慢评测且可能挂起（外网依赖测试）
         test_dir = "tests"
-        for cand in ("tests", "test"):
+        for cand in ("tests", "test", "testing"):
             if os.path.isdir(os.path.join(work, cand)):
                 test_dir = cand
                 break
-        test_cmd = f"{src_hint}python3 -m pytest {test_dir} -q -p no:cacheprovider"
+        # 推导：src/flask/cli.py → tests/test_cli.py
+        import glob as _g
+        _bug_base = os.path.basename(bug_file).replace(".py", "")
+        _rel_tests = _g.glob(os.path.join(work, test_dir, "**", f"test_{_bug_base}.py"), recursive=True)
+        if _rel_tests:
+            _tf = os.path.relpath(_rel_tests[0], work)
+            test_cmd = f"{src_hint}python3 -m pytest {_tf} -q -p no:cacheprovider"
+        else:
+            test_cmd = f"{src_hint}python3 -m pytest {test_dir} -q -p no:cacheprovider"
     else:
         test_cmd = f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6]) + " -q -p no:cacheprovider"
     cfg = AgentConfig(thinking_enabled=True, reasoning_effort="high",
@@ -97,7 +108,8 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
                    python_version="3.8", packages=REPO_DEPS[repo],
                    config=cfg, graph_level=graph_level,
                    early_stop=False,  # 2026-08-08 用户预案：评测关早停（保成功率），产品模式可开
-                   official_mode=os.environ.get("OFFICIAL") == "1")
+                   official_mode=os.environ.get("OFFICIAL") == "1",
+                   problem_statement=inst.get("problem_statement", ""))  # 2026-08-13：issue 必须给 agent
     start = time.time()
     success = fsm.run()
     dur = round(time.time() - start, 1)
@@ -118,8 +130,18 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
     # 官方模式（OFFICIAL=1）：agent 自评成功后，评测阶段应用 test_patch → FTP 真实判定
     official = os.environ.get("OFFICIAL") == "1"
     if official and success:
-        subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=work,
-                       input=inst["test_patch"], capture_output=True, text=True, timeout=60)
+        # 2026-08-13 防作弊（对齐 Claude Code 评估方式）：先恢复原始测试目录
+        # （agent 可能改过 tests/——污染评测则 test_patch 冲突/误判），再应用 test_patch
+        for td in ("tests", "test"):
+            if os.path.isdir(os.path.join(work, td)):
+                subprocess.run(["git", "checkout", inst["base_commit"], "--", td],
+                               cwd=work, capture_output=True, text=True, timeout=60)
+        r_tp = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=work,
+                              input=inst["test_patch"], capture_output=True, text=True, timeout=60)
+        if r_tp.returncode != 0:
+            # test_patch 应用失败（agent 动过测试文件且冲突）→ 判定失败并记录
+            success = False
+            ftp_detail = "test_patch 应用失败（agent 测试污染）: " + r_tp.stderr[-150:]
         ftp_cmd = (f"{src_hint}python3 -m pytest " + " ".join(f'"{t}"' for t in ftp[:6])
                    + " -q -p no:cacheprovider")
         rf = run_in_docker(work, ftp_cmd, python_version="3.8",
@@ -157,6 +179,9 @@ def run_one(inst, work, mode, no_degrade, graph_level=2):
             if not p2p_pass:
                 missing = [n for n in p2p if n not in passed_nodes]
                 p2p_detail = f"P2P 未通过节点: {missing[:5]}"
+    # 2026-08-13 官方口径：resolve = FTP 过 且 P2P 全过（P2P 失败 = 引入回归 = 未解决）
+    if p2p_pass is False:
+        success = False
     return {"success": success, "attempts": fsm.attempt + 1,
             "duration": dur, "mode": mode, "no_degrade": no_degrade,
             "token_total": token_total, "tool_calls": tool_calls,
@@ -198,6 +223,8 @@ def main():
                 results.append(r)
             except Exception as e:
                 print(f"  异常: {str(e)[-200:]}", flush=True)
+                import traceback as _tb
+                _tb.print_exc()
                 results.append({"instance_id": iid, "mode": mode, "no_degrade": nd,
                                 "success": False, "error": str(e)[-200:]})
         # 清理

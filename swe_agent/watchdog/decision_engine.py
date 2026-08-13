@@ -140,6 +140,10 @@ class DecisionEngine:
         2. 最近 5 次调用中，完全相同的调用出现 3 次以上 → 触发
         不同参数的同一工具调用不算重复。
         """
+        # 2026-08-13：run_test 重复是正常流程（改完再测）——watchdog 不拦；
+        # submit 是交卷信号——也不拦
+        if tool_name in ("run_test", "submit"):
+            return False
         import hashlib
         args_hash = hashlib.md5(
             f"{tool_name}:{sorted(arguments.items())}".encode()
@@ -166,6 +170,9 @@ class DecisionEngine:
         return False
 
     def record_state_entry(self, state: str) -> bool:
+        # 2026-08-13：test→patch→test 是正常流（官方模式）——状态检测不拦 test
+        if state == "test":
+            return False
         """记录状态进入，返回 True 表示检测到异常。"""
         self.state_entry_history.append(state)
 

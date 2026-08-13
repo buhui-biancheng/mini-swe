@@ -68,6 +68,10 @@ TRANSITIONS = [
     {"trigger": "check_exhausted", "source": "check", "dest": "rollback"},  # 连续语法失败
     {"trigger": "patch_syntax_error", "source": "patch", "dest": "locate"},  # 兼容旧触发器
     {"trigger": "test_pass", "source": "test", "dest": "success"},
+    # 2026-08-13 提交机制：test exit 0 官方模式 → 回 patch 继续（agent 决定提交）
+    {"trigger": "test_ok", "source": "test", "dest": "patch"},
+    # agent 主动提交 → 交卷
+    {"trigger": "submitted", "source": "patch", "dest": "success"},
     {"trigger": "test_fail", "source": "test", "dest": "locate"},
     {"trigger": "rollback", "source": "test", "dest": "rollback"},      # 代价熔断
     {"trigger": "rollback_retry", "source": "rollback", "dest": "locate"},
@@ -157,6 +161,11 @@ class Checkpoint:
 
 # 2026-08-13 图上下文瘦身：L1 邻域节点上限（seed 优先 + 高 in_degree 核心枢纽）
 MAX_L1_NEIGHBOR_NODES = 30
+# 历史裁剪阈值（2026-08-13）：单次请求体超限会压垮 NAT/代理链路（大请求+长流式
+# = 连接中断 APIConnectionError 的嫌疑根因之一）；无折叠机制下历史无限累积。
+# 裁剪 = 保留 system + 最近 N 条消息（LLM 主要依赖近期上下文——行业标准做法）。
+MAX_HISTORY_CHARS = 2000000  # ~50 万 token（2026-08-13 修正：接近 1M 上限才裁，不伤长任务）
+KEEP_LAST_MESSAGES = 25
 
 
 class AgentFSM:
@@ -184,6 +193,7 @@ class AgentFSM:
         early_stop_patience: int = 2,
         early_stop_min_attempts: int = 3,
         official_mode: bool = False,
+        problem_statement: str = "",
     ):
         """初始化 Agent FSM。
 
@@ -218,6 +228,8 @@ class AgentFSM:
         # 官方模式（2026-08-13）：无 test_patch，自带测试不验证 bug →
         # 要求 LLM 用 run_command 自验证并声明，FSM 检查验证证据
         self.official_mode = official_mode
+        self.problem_statement = problem_statement
+
         # 轨迹落盘（2026-08-13）：验证脚本记录 + 上下文长度统计
         self.verification_log = []  # run_command 调用记录（参数+输出截断）
         self.attempt_trajectory = []  # [{attempt, fail_count, token, cost}] 尝试轨迹
@@ -471,8 +483,22 @@ class AgentFSM:
 
     # ========== 工具回合 ==========
 
+    def _trim_history(self) -> None:
+        """裁剪对话历史：总字符超限时保留 system + 最近 KEEP_LAST_MESSAGES 条。"""
+        total = sum(len(str(m.get("content", ""))) for m in self.messages)
+        if total <= MAX_HISTORY_CHARS:
+            return
+        # 保留第一条（system/初始说明）+ 最近 N 条
+        head = self.messages[:1]
+        tail = self.messages[-KEEP_LAST_MESSAGES:]
+        self.messages = head + [
+            {"role": "system", "content": "[上下文裁剪] 早期工具结果已裁剪（历史超限）。"
+                                          "基于当前可见信息继续任务。"}] + tail
+        print(f"  [TRIM] 历史裁剪: {total:,} 字符 → 保留最近 {KEEP_LAST_MESSAGES} 条")
+
     def _run_llm_turn(self) -> str:
         """调用 LLM 进行工具调用回合（LOCATE 与 PATCH 重修复共用）。"""
+        self._trim_history()
         def tool_executor(tool_name: str, arguments: dict) -> str:
             # 编辑前先记录初始快照（保证 ROLLBACK 能恢复编辑前状态）
             if tool_name == "edit_function":
@@ -559,6 +585,22 @@ class AgentFSM:
 
         # system 不进 conversation 历史（模块 D2：重建而非追加）
         self.messages = [m for m in conversation if m.get("role") != "system"]
+        # 2026-08-13 最简交卷（用户定稿，移除 submit 工具）：LLM 回复【无工具调用】
+        # = 自然完成 = 交卷（mini-swe agent 思路——零协议）
+        if self.official_mode:
+            _last = conversation[-1] if conversation else {}
+            if not _last.get("tool_calls") and _last.get("role") == "assistant":
+                _has_edit = bool(getattr(self, "_edited_ranges", None))
+                if _has_edit:
+                    print("  [DONE] agent 无工具调用回复——视为完成，交卷")
+                    self.submitted()  # patch → success
+                    return "已交卷"
+                # 无修改就结束 → 提示继续（必须 edit）
+                self.messages.append({"role": "user", "content":
+                    "[提示] 你还未修改任何代码。请继续：分析问题描述→view_file 定位→"
+                    "edit_function 修改→run_test 验证。不要直接结束。"})
+                print("  [DONE-但无修改] 无工具调用但未 edit——提示继续")
+                return "继续"
         return final_response
 
     def _on_usage(self, usage: dict) -> None:
@@ -589,6 +631,7 @@ class AgentFSM:
         self._plain_task_msg = (
             f"请修复以下文件中的 bug：\n\n"
             f"文件：{self.bug_file}\n\n"
+            f"问题描述：\n{self.problem_statement}\n\n"
             # 2026-08-13 用户定稿：骨架不再全量注入（9.1k/轮）——
             # 函数级视图由 view_file 按需提供（_file_symbol_listing）
             f"修复完成后运行测试：{self._display_command()}"
@@ -819,26 +862,18 @@ class AgentFSM:
             for node_id in targets:
                 self.graph_manager.update_dynamic_weight(node_id)
                 self.logger.jit_update(node=node_id, accepted=True, reason="success")
-            # 官方模式自验证（2026-08-13）：自带测试不验证 bug——
-            # 必须 LLM 用 run_command 执行过验证脚本，否则引导重新验证
+            # 2026-08-13 最简交卷：test exit 0 → test 状态内调 LLM 工具循环
+            # （agent 继续分析/修改——无工具调用回复=交卷；patch 过渡不调 LLM——死循环修复）
             if self.official_mode:
-                verified = False
-                for m in self.messages:
-                    if m.get("role") == "assistant" and m.get("tool_calls"):
-                        for tc in m["tool_calls"]:
-                            fn = tc.get("function", {})
-                            if fn.get("name") == "run_command":
-                                args = str(fn.get("arguments", ""))
-                                if "python3 -c" in args or "python3 -c" in args or "验证" in args:
-                                    verified = True
-                if not verified:
-                    self.messages.append({"role": "user", "content":
-                        "[自验证协议] 注意：仓库自带测试不验证本 bug（它们本来就通过）。"
-                        "请用 run_command 执行验证脚本（如 python3 -c \"模拟调用并打印输出\"）"
-                        "确认修复行为正确，然后再运行 run_test 确认无回归。"})
-                    self._last_test_failed = True
-                    self.test_fail()  # 引导重走 locate（LLM 看到提示后自验证）
+                self.messages.append({"role": "user", "content":
+                    "[测试反馈] 测试通过（当前代码状态）。注意：测试通过不等于问题已修复——"
+                    "请对照【问题描述】判断：① 问题已解决 → 回复说明完成即可结束；"
+                    "② 问题未解决 → 继续分析并修改代码。"})
+                _final = self._run_llm_turn()  # agent 继续工具循环（或交卷）
+                if self.state in ("fail", "success"):
                     return
+                self.test_ok()  # → patch（过渡）→ check → test
+                return
             self.test_pass()
         else:
             self._last_test_failed = True

@@ -79,7 +79,7 @@ class TestSchemas:
 
     def test_tools_list_length(self):
         # Phase 2 简化：6 → 5 工具；Phase 5 JIT：+report_graph_update → 6
-        assert len(TOOLS) == 6
+        assert len(TOOLS) == 6  # 2026-08-13：submit 移除（最简交卷=无工具调用）
 
     def test_tools_have_correct_types(self):
         for tool in TOOLS:

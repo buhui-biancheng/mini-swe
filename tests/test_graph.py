@@ -584,10 +584,10 @@ class TestLLMRetry:
         request = httpx.Request("GET", "http://test")
         client = self._make_client([
             APIConnectionError(request=request),
-        ] * 4)
+        ] * 8)
         with pytest.raises(AgentAPIError) as exc:
             LLMClient._create_with_retry(client, {})
-        assert exc.value.retries == 4
+        assert exc.value.retries == 8
 
     def test_4xx_not_retried(self):
         client = self._make_client([self._status_error(400)])
