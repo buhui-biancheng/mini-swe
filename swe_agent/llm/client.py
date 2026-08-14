@@ -342,6 +342,13 @@ class LLMClient:
                 usage_callback(response.usage)
 
             if not response.tool_calls:
+                # 2026-08-14 修复交卷门控 bug：最终无工具回复必须 append 进 conversation，
+                # 否则 conversation[-1] 是 tool/user 消息，agent_fsm 的"无工具即交卷"门控
+                # 永远不触发 → 官方模式无限循环（pytest-7168 实测 24M token 的根因）。
+                # 只在 content 非空时 append——空 content / 仅 reasoning 的 assistant 消息
+                # 会让 API 400（要求 content 或 tool_calls；reasoning_content 不算）。
+                if response.content:
+                    conversation.append({"role": "assistant", "content": response.content})
                 return response.content or "", conversation
 
             assistant_msg: dict[str, Any] = {"role": "assistant"}

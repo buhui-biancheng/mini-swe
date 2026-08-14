@@ -264,7 +264,8 @@ class ToolRegistry:
         return self.graph_manager.apply_jit_update(node_id, target, edge_type, evidence)
 
     def _edit_function(self, file_path: str, old_string: str = None, new_string: str = None,
-                       start_line: int = None, end_line: int = None, new_code: str = None) -> dict:
+                       start_line: int = None, end_line: int = None, new_code: str = None,
+                       insert_after: int = None) -> dict:
         # 2026-08-13 围栏：禁止修改测试文件（官方模式防自证陷阱——改测试获假信心）
         _rp = os.path.basename(file_path)
         _d = os.path.basename(os.path.dirname(file_path))
@@ -293,15 +294,41 @@ class ToolRegistry:
 
         with open(abs_path, "r", encoding="utf-8") as f:
             text = f.read()
+        lines = text.splitlines(keepends=True)
 
-        # 模式A：old_string → new_string 精确替换（低摩擦，无需行号）
+        # 模式C：insert_after → 在该行之后插入 new_code
+        if insert_after is not None:
+            if new_code is None:
+                return {"error": "模式C 需要 insert_after（行号）+ new_code（要插入的代码）"}
+            if insert_after < 0 or insert_after > len(lines):
+                return {"error": f"insert_after 超出范围（文件共 {len(lines)} 行）"}
+            insert_text = new_code if new_code.endswith("\n") else new_code + "\n"
+            lines.insert(insert_after, insert_text)
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write("".join(lines))
+            result = {"success": True, "file": file_path, "lines_edited": f"插入@{insert_after+1}",
+                      "start_line": insert_after + 1, "end_line": insert_after + 1, "mode": "insert",
+                      "excerpt": "".join(lines[max(0, insert_after-1):insert_after+3]).rstrip()[:400]}
+            if fence_warnings:
+                result["warning"] = "；".join(fence_warnings)
+                result["penalty"] = fence_penalty
+            return result
+
+        # 模式A：old_string → new_string 精确替换（唯一性检查 + 未找到恢复提示）
         if old_string is not None:
-            if old_string not in text:
-                # 帮助定位：给出"去除空白差异"的模糊提示
-                import re as _re
-                norm = _re.sub(r"\s+", " ", old_string).strip()
-                return {"error": f"old_string 未在文件中找到。请复制文件中的精确文本（含缩进）。"
-                                f"（模糊匹配尝试: {norm[:60]}...）"}
+            count = text.count(old_string)
+            if count == 0:
+                return self._edit_not_found_hint(file_path, lines, old_string)
+            if count > 1:
+                # 报告出现位置的行号（str_replace_editor 风格）——让模型知道在哪加上下文
+                occ_lines = []
+                cursor = 0
+                for _ in range(count):
+                    idx = text.index(old_string, cursor)
+                    occ_lines.append(text[:idx].count("\n") + 1)
+                    cursor = idx + len(old_string)
+                return {"error": f"old_string 在文件中出现 {count} 次（第 {occ_lines} 行），不唯一。"
+                                "请带上更多上下文（前/后几行）让 old_string 精确匹配唯一位置。"}
             idx = text.index(old_string)
             prefix = text[:idx]
             act_start = prefix.count("\n") + 1
@@ -309,8 +336,11 @@ class ToolRegistry:
             text = text[:idx] + (new_string or "") + text[idx + len(old_string):]
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(text)
+            new_lines = text.splitlines(keepends=True)
+            lo = max(0, act_start - 2); hi = min(len(new_lines), act_end + 2)
             result = {"success": True, "file": file_path, "lines_edited": f"{act_start}-{act_end}",
-                      "start_line": act_start, "end_line": act_end, "mode": "old_string"}
+                      "start_line": act_start, "end_line": act_end, "mode": "old_string",
+                      "excerpt": "".join(new_lines[lo:hi]).rstrip()[:400]}
             if fence_warnings:
                 result["warning"] = "；".join(fence_warnings)
                 result["penalty"] = fence_penalty
@@ -318,8 +348,8 @@ class ToolRegistry:
 
         # 模式B：start_line/end_line 行范围替换
         if start_line is None or end_line is None or new_code is None:
-            return {"error": "请二选一：模式A 提供 old_string+new_string；模式B 提供 start_line+end_line+new_code"}
-        lines = text.splitlines(keepends=True)
+            return {"error": "请提供编辑参数（不能全空）：模式A old_string+new_string；"
+                            "或模式B start_line+end_line+new_code；或模式C insert_after+new_code。"}
         if start_line < 1 or end_line > len(lines) or start_line > end_line:
             return {"error": f"行号范围无效: {start_line}-{end_line}，文件共 {len(lines)} 行"}
 
@@ -329,11 +359,29 @@ class ToolRegistry:
             f.writelines(lines)
 
         result = {"success": True, "file": file_path, "lines_edited": f"{start_line}-{end_line}",
-                  "start_line": start_line, "end_line": end_line, "mode": "line_range"}
+                  "start_line": start_line, "end_line": end_line, "mode": "line_range",
+                  "excerpt": "".join(lines[max(0, start_line-2):min(len(lines), end_line+2)]).rstrip()[:400]}
         if fence_warnings:
             result["warning"] = "；".join(fence_warnings)
             result["penalty"] = fence_penalty
         return result
+
+    def _edit_not_found_hint(self, file_path: str, lines: list, old_string: str) -> dict:
+        """old_string 未找到时的恢复提示：引用原文 + 模糊匹配附近行，让模型复制精确文本。"""
+        import re as _re
+        norm = _re.sub(r"\s+", " ", old_string).strip()
+        key = norm[:25]
+        hits = [i + 1 for i, l in enumerate(lines) if key and key.lower() in l.lower()]
+        snippet = ""
+        if hits:
+            first = hits[0]
+            lo = max(0, first - 3); hi = min(len(lines), first + 3)
+            snippet = "\n".join(f"{i+1}: {lines[i].rstrip()}" for i in range(lo, hi))
+        msg = (f"未执行替换：old_str `{old_string[:80]}` 未原样出现在 {file_path} 中。"
+               + f"（模糊匹配尝试: {norm[:50]}...）"
+               + (f"\n疑似附近（第 {hits[:5]} 行）：\n{snippet}" if snippet else "")
+               + "\n请复制文件中的精确文本（含缩进与空行）。")
+        return {"error": msg}
 
     def _run_test(self, command: str) -> dict:
         # 将命令中的宿主机绝对路径转换为容器内路径
@@ -366,42 +414,68 @@ class ToolRegistry:
         }
 
     def _run_command(self, command: str) -> dict:
-        """在宿主机上运行终端命令。"""
+        """运行终端命令（2026-08-14 安全改造：非 git 命令进容器，git 留宿主）。
+
+        - 非 git（grep/python/ls/脚本）：进容器执行——network=False 天然断网（堵死
+          curl/git-show 类作弊通道）+ 正确依赖环境；容器隔离，失败不影响宿主。
+        - git：留宿主——worktree 的 .git 是文件，对象库在主仓库，容器内 git 不可用。
+          git 走宿主时仍过网络/历史防火墙。
+        """
         import subprocess
 
-        try:
-            # 安全检查：禁止危险命令
-            dangerous = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if="]
-            # Phase 6 沙盒模式：命令在容器内执行（只读挂载+tmpfs），Agent 碰不到宿主机
-            if self.sandbox:
+        # git 检测：任一 && 段以 git 开头
+        segments = [s.strip() for s in command.split("&&") if s.strip()]
+        is_git = any(seg == "git" or seg.startswith("git ") for seg in segments)
+
+        if not is_git:
+            # 容器执行（network=False 默认断网，reuse=True 复用 run_test 容器）
+            try:
                 from swe_agent.sandbox.docker_runner import run_in_docker
-                r = run_in_docker(self.code_dir, command, timeout=60)
-                return {"stdout": _truncate_output(r.stdout, 8000), "stderr": _truncate_output(r.stderr, 1500),
+                container_cmd = command
+                if self.code_dir in container_cmd:
+                    container_cmd = container_cmd.replace(self.code_dir, "/workspace")
+                r = run_in_docker(self.code_dir, container_cmd, timeout=60,
+                                  python_version=self.python_version,
+                                  packages=self.packages, reuse=True)
+                return {"stdout": _truncate_output(r.stdout, 8000),
+                        "stderr": _truncate_output(r.stderr, 1500),
                         "exit_code": r.exit_code}
-            for d in dangerous:
-                if d in command.lower():
-                    return {"error": f"危险命令被禁止: {command}"}
+            except Exception as e:
+                return {"error": f"容器命令执行失败: {e}"}
 
-            # 2026-08-13 官方模式网络防火墙：run_command 在宿主机执行（有网），
-            # 不拦就是作弊通道（实测 agent curl 下载上游 cli.py + 查 GitHub PR）。
-            # 禁网络工具类命令——官方模式必须只基于本地仓库求解。
-            if self.block_network:
-                _net = ["curl", "wget", "pip install", "pip3 install",
-                        "pip download", "pip3 download", "git clone",
-                        "git fetch", "git pull", "git remote", "http://", "https://",
-                        "api.github", "raw.githubusercontent", "patch-diff",
-                        "urllib.request", "requests.get",
-                        # 2026-08-13 堵 git 历史/tag 泄漏：本地仓库有全部 tag，
-                        # git show <tag>:file 能直接读出未来版本实现（实测 agent 用过）
-                        "git show", "git log", "git tag", "git branch",
-                        "git rev-list", "git ls-remote", "git describe", "git blame",
-                        "HEAD~", "^HEAD"]
-                if any(k in command.lower() for k in _net):
-                    return {"error": "网络命令被禁止（官方模式离线）——请只使用本地仓库代码推理，"
-                                    "不要尝试联网获取外部代码",
-                            "stdout": "", "stderr": "network blocked", "exit_code": -1}
+        # ===== git → 宿主 =====
+        # Phase 6 沙盒模式：命令在容器内执行（只读挂载+tmpfs），Agent 碰不到宿主机
+        if self.sandbox:
+            from swe_agent.sandbox.docker_runner import run_in_docker
+            r = run_in_docker(self.code_dir, command, timeout=60)
+            return {"stdout": _truncate_output(r.stdout, 8000), "stderr": _truncate_output(r.stderr, 1500),
+                    "exit_code": r.exit_code}
 
-            # 执行命令
+        # 危险命令
+        dangerous = ["rm -rf", "sudo", "chmod 777", "mkfs", "dd if="]
+        for d in dangerous:
+            if d in command.lower():
+                return {"error": f"危险命令被禁止: {command}"}
+
+        # 官方模式网络防火墙（git 走宿主仍有网，需拦网络/历史命令）
+        if self.block_network:
+            _net = ["curl", "wget", "pip install", "pip3 install",
+                    "pip download", "pip3 download", "git clone",
+                    "git fetch", "git pull", "git remote", "http://", "https://",
+                    "api.github", "raw.githubusercontent", "patch-diff",
+                    "urllib.request", "requests.get",
+                    # 2026-08-13 堵 git 历史/tag 泄漏：本地仓库有全部 tag，
+                    # git show <tag>:file 能直接读出未来版本实现（实测 agent 用过）
+                    "git show", "git log", "git tag", "git branch",
+                    "git rev-list", "git ls-remote", "git describe", "git blame",
+                    "HEAD~", "^HEAD"]
+            if any(k in command.lower() for k in _net):
+                return {"error": "网络命令被禁止（官方模式离线）——请只使用本地仓库代码推理，"
+                                "不要尝试联网获取外部代码",
+                        "stdout": "", "stderr": "network blocked", "exit_code": -1}
+
+        # 执行命令
+        try:
             result = subprocess.run(
                 command,
                 shell=True,
@@ -410,13 +484,11 @@ class ToolRegistry:
                 timeout=30,
                 cwd=self.code_dir,
             )
-
             return {
                 "stdout": result.stdout[:2000] if result.stdout else "",
                 "stderr": result.stderr[:500] if result.stderr else "",
                 "exit_code": result.returncode,
             }
-
         except subprocess.TimeoutExpired:
             return {"error": f"命令执行超时: {command}"}
         except Exception as e:

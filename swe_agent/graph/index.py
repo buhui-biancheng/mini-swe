@@ -43,9 +43,16 @@ class GraphIndex:
             except Exception:
                 self._logger = None
         self._build_adjacency()
+        self._query_count = 0  # 2026-08-14 图查询计数（量化"图用了多少"证据）
+
+    @property
+    def query_count(self) -> int:
+        """本会话图查询总次数（search/impact/neighbors/summary）。"""
+        return self._query_count
 
     def _log_query(self, query_type: str, node: str = "", hops: int = 1) -> None:
         """记录图查询事件（DEBUG 级，供 Phase 2 调试 FSM 查询轨迹）。"""
+        self._query_count += 1
         if self._logger is not None:
             self._logger.graph_query(query_type=query_type, node=node, hops=hops)
 
@@ -86,6 +93,84 @@ class GraphIndex:
         hi = min(lo + 1, len(values) - 1)
         frac = k - lo
         return values[lo] * (1.0 - frac) + values[hi] * frac
+
+    # ========== 紧凑源码包结构（2026-08-14，替代全量 L-1 注入）==========
+
+    @staticmethod
+    def _module_purpose(file_path: str, max_len: int = 60) -> str:
+        """模块 docstring 首行（语义锚点）。离线 ast 提取，无 docstring 返回空串（优雅降级）。"""
+        try:
+            import ast
+            with open(file_path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            doc = ast.get_docstring(tree)
+            if not doc:
+                return ""
+            return doc.strip().splitlines()[0].strip()[:max_len]
+        except Exception:
+            return ""
+
+    def _derive_source_root(self, bug_file: str) -> str:
+        """从 bug 文件路径推导主源码包根（绝对路径）。
+
+        规则（通用，不 per-repo 硬编码）：
+          - 路径含 /src/ → src/ 下第一段包（src/_pytest/x → src/_pytest）
+          - 否则 → 第一个非排除的顶层目录（pylint/x → pylint；requests/x → requests）
+          - 排除已知非源码目录（docs/tests/bench/examples/scripts/extra）
+        """
+        if not bug_file:
+            return self.graph.meta.code_dir or ""
+        root = self.graph.meta.code_dir or ""
+        try:
+            rel = os.path.relpath(bug_file, root).replace("\\", "/")
+        except ValueError:
+            return root
+        parts = [p for p in rel.split("/") if p and p not in (".", "..")]
+        exclude = {"tests", "test", "testing", "docs", "doc", "bench",
+                   "examples", "example", "scripts", "extra"}
+        if "src" in parts:
+            i = parts.index("src")
+            sub = parts[i:i + 2] if i + 1 < len(parts) else ["src"]
+            return os.path.normpath(os.path.join(root, *sub))
+        for p in parts:
+            if p not in exclude:
+                return os.path.normpath(os.path.join(root, p))
+        return root
+
+    def module_tree_text(self, bug_file: str = "", with_purpose: bool = True) -> str:
+        """紧凑源码包结构：源码包内 模块 | 函数数 | 用途 列表（不含函数名/全量边）。
+
+        目标 ~0.5-2K token（pytest 49 模块），替代全量 L-1 文件级先验（35K）。
+        结构理解来自：源码包边界 + 模块名 + 一句用途；函数/边详情走按需查询。
+        注意：图节点 file 可能是相对 code_dir 的相对路径，也可能是绝对路径——
+        统一转相对 code_dir 后匹配。
+        """
+        code_dir = self.graph.meta.code_dir or ""
+        src_root_abs = self._derive_source_root(bug_file)
+        if not src_root_abs or not os.path.isdir(src_root_abs):
+            return "【源码包结构】（未推导源码根）"
+        if code_dir:
+            src_rel = os.path.relpath(src_root_abs, code_dir).replace("\\", "/")
+        else:
+            src_rel = src_root_abs.replace("\\", "/")
+
+        files: dict = {}
+        for n in self.graph.nodes.values():
+            if n.node_type.value != "function":
+                continue
+            f = n.file.replace("\\", "/")
+            if f.startswith(src_rel) or f.startswith(src_root_abs.replace("\\", "/")):
+                files.setdefault(f, []).append(n.name)
+        if not files:
+            return f"【源码包结构】{os.path.basename(src_root_abs)}/（无函数节点）"
+        lines = [f"# 源码包: {src_rel}/", "# 模块 | 函数数 | 用途"]
+        for f in sorted(files):
+            f_abs = f if os.path.isabs(f) else os.path.join(code_dir, f)
+            rel = os.path.relpath(f_abs, src_root_abs).replace("\\", "/")
+            purpose = self._module_purpose(f_abs) if with_purpose else ""
+            p = f" | {purpose}" if purpose else ""
+            lines.append(f"{rel} | {len(files[f])}{p}")
+        return "\n".join(lines)
 
     def file_level_prior_text(self) -> str:
         """L-1 文件级全局先验：代码库结构地图（文件|函数数|入度|枢纽）+ 文件间调用。
@@ -332,91 +417,105 @@ class GraphIndex:
 
     # ========== 影响面计算（去环 BFS） ==========
 
-    def compute_impact(self, node_id: str,
-                       max_hops: Optional[int] = None,
-                       decay: Optional[float] = None) -> float:
-        """计算影响面：从起点沿调用链向调用方/消费方延伸，点权累加。
+    def _impact_traverse(self, node_id: str, direction: str,
+                         max_hops: int, decay: float) -> tuple[float, list[dict]]:
+        """沿调用方向遍历影响面：up=callers（谁用我），down=callees（我依赖谁）。
 
-        去环规则：每个节点在一条路径上只能贡献一次影响面。
-        点权 = max(1, dynamic_weight) × in_degree_normalized × 衰减因子^跳数
+        2026-08-14 双向化：原来只向上 → 改依赖的风险漏算。现在 up/down 分开算，
+        都返回 (total, details)。生产入度归一化（非测试调用数），down 额外跳过非项目文件。
         """
-        self._log_query("impact", node=node_id, hops=max_hops or self.config.max_hops)
-        max_hops = max_hops if max_hops is not None else self.config.max_hops
-        decay = decay if decay is not None else self.config.decay
-        total_cost = 0.0
-        visited = {node_id}
-        queue = deque([(node_id, 0)])
-
-        while queue:
-            node, hops = queue.popleft()
-            if hops >= max_hops:
-                continue
-
-            for caller in self.get_callers(node):
-                if caller.node_id in visited:
-                    continue  # 断链，不往后算
-                visited.add(caller.node_id)
-                if self.is_test_node(caller):
-                    continue  # 测试调用不算生产影响面
-
-                in_degree_norm = (
-                    caller.in_degree / self.graph.meta.max_in_degree
-                    if self.graph.meta.max_in_degree else 0.0
-                )
-                history_factor = max(1, caller.dynamic_weight)  # 默认为 1，不归零
-                current_decay = decay ** hops
-                cost = history_factor * in_degree_norm * current_decay
-                total_cost += cost
-
-                queue.append((caller.node_id, hops + 1))
-
-        return round(total_cost, 6)
-
-    def compute_impact_detail(self, node_id: str,
-                              max_hops: Optional[int] = None,
-                              decay: Optional[float] = None) -> dict:
-        """影响面计算（含明细，供日志/演示）。"""
-        self._log_query("impact_detail", node=node_id, hops=max_hops or self.config.max_hops)
-        max_hops = max_hops if max_hops is not None else self.config.max_hops
-        decay = decay if decay is not None else self.config.decay
         total = 0.0
         details = []
         visited = {node_id}
         queue = deque([(node_id, 0)])
-
+        max_deg = self.graph.meta.max_in_degree or 1
         while queue:
-            node, hops = queue.popleft()
+            cur_id, hops = queue.popleft()
             if hops >= max_hops:
                 continue
-            for caller in self.get_callers(node):
-                if caller.node_id in visited:
+            nbrs = self.get_callers(cur_id) if direction == "up" else self.get_callees(cur_id)
+            for n in nbrs:
+                if n.node_id in visited:
                     continue
-                visited.add(caller.node_id)
-                if self.is_test_node(caller):
-                    continue  # 测试调用不算生产影响面
-                norm = (caller.in_degree / self.graph.meta.max_in_degree
-                        if self.graph.meta.max_in_degree else 0.0)
-                hist = max(1, caller.dynamic_weight)
+                visited.add(n.node_id)
+                if self.is_test_node(n):
+                    continue
+                if direction == "down" and not self._is_project_file(n.file):
+                    continue
+                norm = self._production_in_degree(n) / max_deg
+                hist = max(1, n.dynamic_weight)
                 dec = decay ** hops
                 cost = hist * norm * dec
                 total += cost
                 details.append({
-                    "node": caller.node_id,
+                    "node": n.node_id,
                     "hops": hops + 1,
                     "history_factor": hist,
                     "in_degree_norm": round(norm, 6),
                     "decay": round(dec, 6),
                     "cost": round(cost, 6),
                 })
-                queue.append((caller.node_id, hops + 1))
+                queue.append((n.node_id, hops + 1))
+        return total, details
 
+    def _production_in_degree(self, node: "Node") -> int:
+        """生产入度：来自非测试节点的入边数（归一化用，替代含测试的总入度）。
+
+        原 in_degree 含测试调用 → 被测试广泛调用的函数入度虚高，影响面失真。
+        """
+        cnt = 0
+        for e in self._reverse.get(node.node_id, []):
+            src = self.graph.nodes.get(e.source)
+            if src is not None and not self.is_test_node(src):
+                cnt += 1
+        return cnt
+
+    def _is_project_file(self, file_path: str) -> bool:
+        """是否项目源码文件（排除第三方/虚拟环境目录）。"""
+        p = file_path.replace("\\", "/")
+        for bad in ("site-packages", "dist-packages", "node_modules",
+                    ".venv", "venv", ".tox"):
+            if bad in p:
+                return False
+        return True
+
+    def compute_impact(self, node_id: str,
+                       max_hops: Optional[int] = None,
+                       decay: Optional[float] = None) -> float:
+        """影响面（2026-08-14 双向）：up(callers) + down(callees)。
+
+        去环规则：每个节点在一条路径上只能贡献一次影响面。
+        点权 = max(1, dynamic_weight) × 生产入度归一化 × 衰减因子^跳数
+        """
+        self._log_query("impact", node=node_id, hops=max_hops or self.config.max_hops)
+        max_hops = max_hops if max_hops is not None else self.config.max_hops
+        decay = decay if decay is not None else self.config.decay
+        up, _ = self._impact_traverse(node_id, "up", max_hops, decay)
+        down, _ = self._impact_traverse(node_id, "down", max_hops, decay)
+        return round(up + down, 6)
+
+    def compute_impact_detail(self, node_id: str,
+                              max_hops: Optional[int] = None,
+                              decay: Optional[float] = None) -> dict:
+        """影响面计算（2026-08-14 双向 + 生产入度，含明细，供日志/演示）。"""
+        self._log_query("impact_detail", node=node_id, hops=max_hops or self.config.max_hops)
+        max_hops = max_hops if max_hops is not None else self.config.max_hops
+        decay = decay if decay is not None else self.config.decay
+        up, up_d = self._impact_traverse(node_id, "up", max_hops, decay)
+        down, down_d = self._impact_traverse(node_id, "down", max_hops, decay)
         return {
             "start": node_id,
-            "total_cost": round(total, 6),
-            "affected_nodes": len(details),
+            "up_total": round(up, 6),
+            "down_total": round(down, 6),
+            "total_cost": round(up + down, 6),
+            "affected_nodes": len(up_d) + len(down_d),
+            "affected_up": len(up_d),
+            "affected_down": len(down_d),
             "max_hops": max_hops,
             "decay": decay,
-            "details": details,
+            "details": up_d + down_d,
+            "up_details": up_d,
+            "down_details": down_d,
         }
 
     # ========== 骨架兼容层 ==========

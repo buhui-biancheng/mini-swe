@@ -232,6 +232,69 @@ class GraphManager:
         self.save_weights()
         self._merge_weights()
 
+    # ========== 跨会话先验权重（2026-08-14）==========
+    # 目的：跨会话"老带新"——历史反复出 bug 的区域，新会话开局就有偏置。
+    # 闸门（用户定稿）：
+    #   R1: 只在"验证成功"会话写入（成功 + verified/测试过）——坏会话不污染
+    #   R3: 评测每个实例禁用（load_prior=False）——不剧透 benchmark
+    #   R2/R4: 指数衰减 + 封顶 + 软偏置（max 合并）——旧信号自然淘汰，不硬门
+    PRIOR_DIR = os.path.expanduser("~/.swe_agent/prior")
+    PRIOR_DECAY = 0.9          # 老经验衰减系数（0.9 = 新信号 10% 进入）
+    PRIOR_BOOST = 2.0          # 每次验证成功的信号值（>1 才有偏置；fixed point ≈ 2）
+    PRIOR_CAP = (1.0, 10.0)    # 权重封顶，防爆炸/污染
+
+    def _prior_path(self, repo_key: str) -> str:
+        key = (repo_key or "").replace("/", "_").replace("\\", "_") or "default"
+        return os.path.join(self.PRIOR_DIR, f"{key}.json")
+
+    def load_prior(self, repo_key: str = "") -> dict:
+        """加载仓库级先验权重 {node_id: float}。"""
+        try:
+            import json
+            p = self._prior_path(repo_key)
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def apply_prior(self, repo_key: str = "") -> None:
+        """把跨会话先验设为节点初始 dynamic_weight（软偏置：max(现有, 先验)）。"""
+        prior = self.load_prior(repo_key)
+        if not prior or self._index is None:
+            return
+        applied = 0
+        for nid, w in prior.items():
+            node = self._index.graph.nodes.get(nid)
+            if node is not None:
+                node.dynamic_weight = max(node.dynamic_weight, float(w))
+                applied += 1
+        if applied:
+            print(f"[PRIOR] 应用跨会话先验 {applied} 个节点（{self._prior_path(repo_key)}）")
+
+    def merge_prior(self, repo_key: str, success_node_ids: list) -> None:
+        """验证成功的会话：把本次成功节点并入先验（指数衰减 + 封顶 + 持久化）。
+
+        只存标量权重（文件:函数 → 数），不存代码/方法——不污染新会话上下文。
+        """
+        if not success_node_ids:
+            return
+        try:
+            import json
+            prior = self.load_prior(repo_key)
+            for nid in success_node_ids:
+                old = float(prior.get(nid, 1.0))
+                new = old * self.PRIOR_DECAY + self.PRIOR_BOOST * (1 - self.PRIOR_DECAY)
+                prior[nid] = round(min(max(new, self.PRIOR_CAP[0]), self.PRIOR_CAP[1]), 4)
+            os.makedirs(self.PRIOR_DIR, exist_ok=True)
+            with open(self._prior_path(repo_key), "w", encoding="utf-8") as f:
+                json.dump(prior, f, ensure_ascii=False, indent=1)
+            print(f"[PRIOR] 已并入 {len(success_node_ids)} 个成功节点到先验")
+        except Exception as e:
+            print(f"[PRIOR] 写入失败: {e}")
+
     def _merge_weights(self) -> None:
         """把持久化权重合并到当前图节点。"""
         if not self._weights:

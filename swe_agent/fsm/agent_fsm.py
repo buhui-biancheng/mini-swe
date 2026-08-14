@@ -197,6 +197,8 @@ class AgentFSM:
         early_stop_min_attempts: int = 3,
         official_mode: bool = False,
         problem_statement: str = "",
+        load_prior: bool = True,
+        repo_key: str = "",
     ):
         """初始化 Agent FSM。
 
@@ -263,6 +265,11 @@ class AgentFSM:
 
         self.graph_manager = GraphManager(self.code_dir, config=self.agent_config)
         self.graph_index = self.graph_manager.build()
+        # 2026-08-14 跨会话先验：仓库级"历史易出 bug 区域"软偏置（评测禁用，防剧透）
+        self.load_prior = load_prior
+        self.repo_key = repo_key or os.path.basename(self.code_dir)
+        if load_prior:
+            self.graph_manager.apply_prior(self.repo_key)
         # 评测消融：骨架 = 粗准（文件级），graph_level >= 2 才有
         self.skeleton_text = (self.graph_index.generate_skeleton_text()
                               if self.graph_level >= 2 else "")
@@ -385,8 +392,9 @@ class AgentFSM:
 
         # L-1 文件级全局先验（在 L0 之前，最优先注入；数据全部现成，聚合视图）
         # 粗准（大地图）：graph_level >= 2 才有
+        # 2026-08-14：全量 L-1（35K）换成紧凑源码包模块树（~0.5-2K，含 docstring 用途）
         if self.graph_level >= 2:
-            parts.append(self._file_level_prior_text())
+            parts.append(self.graph_index.module_tree_text(self.bug_file, with_purpose=True))
 
         # L0 摘要（粗准：图级概览）
         summary = self.graph_index.get_summary()
@@ -980,22 +988,20 @@ class AgentFSM:
             parsed.full_log_path = full_log_path
             self._append_failure_context(parsed)
 
-            # 影响面代价熔断（模块 C）：≥ 阈值 → ROLLBACK
+            # 影响面（2026-08-14 改为"信号"而非"独立开关"）：高影响只在"无进展"时触发回滚，
+            # 避免误杀合法大重构（之前 impact≥阈值 单独熔断 → 一次失败就回滚）
             impact = compute_edited_impact(
                 self.graph_index, self._edited_ranges, self.agent_config, self.fence
             )
+            impact_high = impact["total"] >= self.agent_config.impact_threshold
+            if impact_high:
+                print(f"[TEST] ⚠️ 影响面高 {impact['total']:.4f}（旁路信号，不单独熔断）")
             if self.step > self.agent_config.max_steps:
                 print(f"[TEST] 步数超限（{self.step}/{self.agent_config.max_steps}），失败")
                 self.retries_exhausted()
                 return
-            if impact["total"] >= self.agent_config.impact_threshold:
-                print(f"[TEST] 影响面 {impact['total']} ≥ 阈值 "
-                      f"{self.agent_config.impact_threshold}，触发 ROLLBACK")
-                self.logger.rollback_triggered("impact", self.bug_file)
-                self.rollback()  # test → rollback
-                return
 
-            # 收益早停（2026-08-08 三修）：免死期 + 错误签名变化=进展 + 降级而非停止
+            # 记录尝试轨迹（供影响面/早停决策）
             fail_sig = frozenset(
                 f"{e.file}:{e.lineno}:{e.error_type}" for e in parsed.grouped_errors)
             self.attempt_trajectory.append({
@@ -1005,18 +1011,30 @@ class AgentFSM:
                 "token": self.token_budget.total,
                 "cost": self.token_budget.estimate_cost(),
             })
+
+            # 高影响 + 失败数未优于历史最优 → 回滚（真死路）；其余情况让测试结果主导
+            if impact_high and len(self.attempt_trajectory) >= 2:
+                best_prev = min(x["fail_count"] for x in self.attempt_trajectory[:-1])
+                if self.attempt_trajectory[-1]["fail_count"] >= best_prev:
+                    print(f"[TEST] 高影响 + 失败数未优于历史最优"
+                          f"（{self.attempt_trajectory[-1]['fail_count']} ≥ {best_prev}）→ 回滚")
+                    self.logger.rollback_triggered("impact", self.bug_file)
+                    self.rollback()  # test → rollback
+                    return
+
+            # 收益早停 v2（2026-08-14 修复反效果）：
+            # 原逻辑把"错误签名变化"当进展（换方向≠收敛）→ 卡住的 agent 永不被停 / 误停。
+            # 现在只看失败数：最近 patience 次里是否刷新"窗口前最优失败数"（允许中途波动）。
             if (self.early_stop
                     and len(self.attempt_trajectory) > self.early_stop_min_attempts
                     and len(self.attempt_trajectory) > self.early_stop_patience):
                 recent = self.attempt_trajectory[-self.early_stop_patience:]
-                best = min(x["fail_count"] for x in self.attempt_trajectory[:-self.early_stop_patience])
-                # 进展 = 失败数严格减少 OR 错误签名变化（不同错误=在探索不同方向）
-                progressed = any(
-                    x["fail_count"] < best or x["fail_signature"] != recent[0]["fail_signature"]
-                    for x in recent)
-                if not progressed:
-                    print(f"[EARLY-STOP] 连续 {self.early_stop_patience} 次无进展"
-                          f"（失败数 {[x['fail_count'] for x in recent]}，签名未变）")
+                best_before = min(
+                    x["fail_count"] for x in self.attempt_trajectory[:-self.early_stop_patience])
+                improved = any(x["fail_count"] < best_before for x in recent)
+                if not improved:
+                    print(f"[EARLY-STOP] 最近 {self.early_stop_patience} 次未刷新窗口前最优"
+                          f"（best_before={best_before}，最近 {[x['fail_count'] for x in recent]}）")
                     if self.no_degrade:
                         # 评测禁降级（消融变量控制）：直接停止
                         print("[EARLY-STOP] no_degrade 模式，直接停止")
@@ -1251,6 +1269,13 @@ class AgentFSM:
         # Phase 4：任务成功，清理快照（权重已持久化保留）
         self.snapshot_mgr.clear()
         """SUCCESS 状态：修复成功。"""
+        # 跨会话先验（2026-08-14）：验证成功的会话 → 成功节点并入仓库级先验。
+        # 只在 load_prior 开启（评测关）时写入——坏会话/评测不污染、不剧透。
+        if getattr(self, "load_prior", False):
+            try:
+                self.graph_manager.merge_prior(self.repo_key, self._success_weight_targets())
+            except Exception:
+                pass
         # Greedy 修复成功 → 回写图权重已做，切回 DP（模块 F）
         if self.effective_mode == "greedy":
             self._switch_mode("dp", reason="greedy_success")

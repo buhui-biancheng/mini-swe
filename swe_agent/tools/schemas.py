@@ -23,16 +23,18 @@ class ViewFileArgs(BaseModel):
 
 
 class EditFunctionArgs(BaseModel):
-    """编辑文件（两种模式二选一）：
-    模式A（推荐，低摩擦）：old_string→new_string 精确替换，无需行号（new_string 缺省=删除）
-    模式B：start_line + end_line + new_code 按行范围替换（精确行号）
+    """编辑文件（三种模式任选其一）：
+    模式A（推荐，低摩擦）：old_string→new_string 精确替换，old_string 必须唯一且精确匹配
+    模式B：start_line + end_line + new_code 按行范围替换
+    模式C（插入）：insert_after（行号，在该行之后插入）+ new_code
     """
     file_path: str = Field(description="要编辑的文件路径")
-    old_string: Optional[str] = Field(description="模式A：要替换的原文（必须精确匹配文件中内容）", default=None)
+    old_string: Optional[str] = Field(description="模式A：要替换的原文（必须精确匹配且唯一）", default=None)
     new_string: Optional[str] = Field(description="模式A：替换成的新文本（缺省表示删除 old_string）", default=None)
     start_line: Optional[int] = Field(description="模式B：起始行号（从 1 开始）", default=None)
     end_line: Optional[int] = Field(description="模式B：结束行号（包含）", default=None)
-    new_code: Optional[str] = Field(description="模式B：替换的新代码", default=None)
+    new_code: Optional[str] = Field(description="模式B/C：替换或插入的新代码", default=None)
+    insert_after: Optional[int] = Field(description="模式C：在该行号之后插入 new_code", default=None)
 
 
 class RunTestArgs(BaseModel):
@@ -108,7 +110,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "edit_function",
-            "description": "编辑文件中的代码。推荐用模式A：old_string（要替换的原文，必须精确匹配）+ new_string（新文本）精确替换，无需行号；也可用模式B：start_line+end_line+new_code 按行范围替换",
+            "description": "编辑文件中的代码。三种模式：① 模式A（推荐）old_string（原文，必须精确匹配且唯一）+ new_string（新文本）精确替换，无需行号；② 模式B start_line+end_line+new_code 行范围替换；③ 模式C insert_after（行号）+new_code 在该行后插入",
             "parameters": EditFunctionArgs.model_json_schema(),
         },
     },
