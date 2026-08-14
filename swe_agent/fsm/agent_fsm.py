@@ -345,6 +345,7 @@ class AgentFSM:
         self._prev_state: Optional[str] = None  # 记录上一状态，用于 transition 日志
         self._edited_ranges: list[tuple] = []   # 记录本次编辑的 (file, start, end)
         self._signature_notes: list = []        # CHECK 检测到的签名变更调用方提醒
+        self._guided_nodes: set = set()         # 2026-08-14 已注入过阅读指南的节点（去重）
 
     # ========== 日志与上下文 ==========
 
@@ -853,8 +854,43 @@ class AgentFSM:
                 print(f"[CHECK] 本次编辑影响面: {impact['total']} "
                       f"(涉及 {impact['nodes']})")
                 self._check_signature_changes(impact["nodes"])
+                # 4. 修改链路阅读指南（2026-08-14）：高影响/签名变更时注入 up/down 链路
+                self._inject_change_guide(impact)
 
         self.check_pass()  # → test
+
+    def _inject_change_guide(self, impact: dict) -> None:
+        """高影响/签名变更时，注入"修改链路阅读指南"（调用方 up + 被调 down + 建议）。
+
+        - gated：只对高影响（影响面 ≥ 阈值）节点注入，非每编辑
+        - 去重：同节点只注入一次（_guided_nodes），省 token
+        - 追加到 messages 末尾 → 不改前缀，缓存命中率基本不降
+        - 软约束：建议性质，不拦截；作用 = 给 flash 一个具体沿图阅读路径
+        """
+        if not getattr(self, "graph_index", None):
+            return
+        guide = []
+        for nid in impact.get("nodes", []):
+            if nid in self._guided_nodes:
+                continue
+            detail = self.graph_index.compute_impact_detail(nid)
+            # 门槛：连通节点数 ≥ 3 才引导（有实际调用关系的改动才有读链路的必要）
+            if detail.get("affected_nodes", 0) < 3:
+                continue
+            up = [d["node"] for d in detail.get("up_details", [])[:3]]
+            down = [d["node"] for d in detail.get("down_details", [])[:3]]
+            guide.append(
+                f"- {nid}（影响面 {detail['total_cost']:.4f}）\n"
+                f"  调用方（改动会影响谁，去读验证兼容）: {', '.join(up) if up else '无'}\n"
+                f"  被调（依赖什么，确认还在）: {', '.join(down) if down else '无'}"
+            )
+            self._guided_nodes.add(nid)
+        if guide:
+            msg = ("【图反馈 · 修改链路】你这次改动涉及高影响节点，建议沿图读：\n"
+                   + "\n".join(guide)
+                   + "\n→ 先读直接调用方验证改动兼容，再跑测试；若测试失败且改动范围大，考虑缩小改动。")
+            self.messages.append({"role": "user", "content": msg})
+            print(f"[GUIDE] 已注入修改链路阅读指南（{len(guide)} 个节点）")
 
     def _check_signature_changes(self, node_ids: list) -> None:
         """签名变更调用方适配检查（Phase 2 P2 任务）。
