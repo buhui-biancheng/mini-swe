@@ -23,6 +23,7 @@ class AgentConfig:
     max_steps: int = 50              # 最大步骤数
     token_budget: Optional[int] = 100000  # Token 预算（None=无上限，评测用）
     max_tool_calls: Optional[int] = None  # 2026-08-13 工具调用硬上限（None=关闭；原 120 硬编码已废弃）
+    guide_connectivity_threshold: int = 8  # 2026-08-14 修改链路阅读指南的连通门槛（affected_nodes ≥ 此值才注入）
 
     # 权限围栏（Phase 2 模块 B）
     fence_penalty: float = 2.0       # 高影响文件的影响面代价惩罚乘数

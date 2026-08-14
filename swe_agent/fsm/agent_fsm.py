@@ -874,8 +874,9 @@ class AgentFSM:
             if nid in self._guided_nodes:
                 continue
             detail = self.graph_index.compute_impact_detail(nid)
-            # 门槛：连通节点数 ≥ 3 才引导（有实际调用关系的改动才有读链路的必要）
-            if detail.get("affected_nodes", 0) < 3:
+            # 门槛：连通节点数 ≥ 配置阈值才引导（有实际调用关系的改动才有读链路的必要；
+            # 硬门槛即可——affected_nodes 是绝对量，与仓库大小无关，绑定文件数属过度设计）
+            if detail.get("affected_nodes", 0) < self.agent_config.guide_connectivity_threshold:
                 continue
             up = [d["node"] for d in detail.get("up_details", [])[:3]]
             down = [d["node"] for d in detail.get("down_details", [])[:3]]
