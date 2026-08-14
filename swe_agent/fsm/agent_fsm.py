@@ -874,9 +874,10 @@ class AgentFSM:
             if nid in self._guided_nodes:
                 continue
             detail = self.graph_index.compute_impact_detail(nid)
-            # 门槛：连通节点数 ≥ 配置阈值才引导（有实际调用关系的改动才有读链路的必要；
-            # 硬门槛即可——affected_nodes 是绝对量，与仓库大小无关，绑定文件数属过度设计）
-            if detail.get("affected_nodes", 0) < self.agent_config.guide_connectivity_threshold:
+            # 门槛：看 UP（调用方）数量 ≥ 配置阈值才引导——down（被调进 stdlib/库）会把
+            # affected 撑爆，但改自己不会断 callees；真正可能被弄断的是 callers。
+            # pytest-7168 实测：改 saferepr 各函数 up 最大 6 → 不触发，零 token 开销。
+            if detail.get("affected_up", 0) < self.agent_config.guide_connectivity_threshold:
                 continue
             up = [d["node"] for d in detail.get("up_details", [])[:3]]
             down = [d["node"] for d in detail.get("down_details", [])[:3]]
