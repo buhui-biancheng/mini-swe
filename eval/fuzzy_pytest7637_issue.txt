@@ -1,0 +1,5 @@
+Some deprecation warnings were temporarily suppressed in the previous release to comply with a deprecation policy that requires a feature to emit warnings for at least two versions before it can be removed. That period has now elapsed, so the suppressed warnings should be re-enabled.
+
+Task: restore the deprecation warnings that were suppressed. Several features were marked for deprecation near the previous release and their warnings were held back at that time. After the fix, using any of those deprecated features should emit a deprecation warning again (they currently run silently).
+
+Verify by: constructing an app/tests that use the deprecated features and confirming a deprecation warning is emitted; and confirm the existing test suite still passes.
