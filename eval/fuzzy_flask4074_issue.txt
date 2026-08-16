@@ -1,0 +1,26 @@
+A route module registered into an application more than once generates wrong links.
+
+When the same route module is mounted under two different URL prefixes, the links it produces always point to the first mount, even when the app is accessed through the second one. So the same code works correctly for the first mount but returns the wrong URL for the second.
+
+Repro:
+
+```python
+from flask import Blueprint, Flask, url_for
+
+bp = Blueprint('foo', __name__)
+
+@bp.route('/')
+def func():
+    return url_for('.func')
+
+app = Flask(__name__)
+app.register_blueprint(bp, url_prefix='/foo')
+app.register_blueprint(bp, url_prefix='/bar')
+
+client = app.test_client()
+print client.get('/foo/').data
+print client.get('/bar/').data
+```
+
+Expected: when accessed via `/bar/`, the generated link should point to `/bar/`.
+Actual: both accesses generate a link pointing to `/foo/` (the first mount). This is wrong — the second mount must produce its own correct link, and both mounts should behave independently.
