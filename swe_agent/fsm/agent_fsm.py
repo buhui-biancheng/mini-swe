@@ -167,7 +167,10 @@ MAX_L1_NEIGHBOR_NODES = 30
 # 全量重发累积历史是 token 爆炸主因（实测 7.5M 里 7.3M 是 cache-read 的重发）。
 # 2M 字符（≈50万token）太宽——实测对话涨到 ~1.5M 字符从不裁剪。压到 80 万字符
 # （≈20万token），超限即保留 system + 首条任务 + 最近 N 条（LLM 依赖近期上下文）。
-MAX_HISTORY_CHARS = 800000
+# 历史裁剪阈值（2026-08-16）：模型上下文 1M token（≈4M 字符）。
+# 取 50%（2M 字符 ≈ 500K token）——留一半给 system prompt + 本轮新输出 + 工具结果，
+# 历史能保留大半又不撑爆；比之前 800K（20%）宽松，长任务不丢早期上下文。
+MAX_HISTORY_CHARS = 2000000
 KEEP_LAST_MESSAGES = 25
 
 

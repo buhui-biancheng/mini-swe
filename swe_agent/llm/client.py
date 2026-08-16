@@ -34,8 +34,8 @@ class LLMResponse:
 @dataclass
 class LLMClient:
     api_key: str = ""
-    base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-flash"  # 2026-08-08 换 flash（384K 上下文，官方文档确认）
+    base_url: str = "https://opencode.ai/zen/go/v1"  # 2026-08-16 换 opencode zen/go
+    model: str = "deepseek-v4-flash"
 
     def __post_init__(self):
         if not self.api_key:
