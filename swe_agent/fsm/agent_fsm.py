@@ -638,6 +638,17 @@ class AgentFSM:
                             "run_test（或用 run_command 运行 python/pytest）确认修改可运行。"})
                         print("  [DONE-未验证] 有修改但未验证——要求先跑测试")
                         return "继续"
+                    # 2026-08-16 计划复查：有未完成计划项 → 不交卷（治本：多目标全覆盖）
+                    _pending = [t["task"] for t in getattr(self.registry, "plan", [])
+                                if not t.get("done")]
+                    if _pending:
+                        self.messages.append({"role": "user", "content":
+                            f"[系统] 你的计划还有 {len(_pending)} 项未完成：{_pending[:5]}"
+                            f"{'...' if len(_pending) > 5 else ''}。"
+                            "请完成后再交卷，或用 set_plan 更新计划（标注已完成的项）。"
+                            "不要遗漏多处修复。"})
+                        print(f"  [DONE-计划未完成] {len(_pending)} 项待办未完成——不交卷")
+                        return "继续"
                     print("  [DONE] agent 无工具调用回复 + 已验证——交卷")
                     self.submitted()  # → success
                     return "已交卷"
@@ -715,7 +726,11 @@ class AgentFSM:
                 "2. 修改后用 run_test 验证你的改动。\n"
                 "3. 严禁联网或读取仓库之外的内容——这是严格离线任务，外部代码对你无用。\n"
                 "4. 行动偏向：信息够了就动手，不要反复确认；给具体修复方案而不是罗列选项。\n"
-                "5. edit_function 推荐用 old_string→new_string 精确替换（无需行号），改起来最快。")
+                "5. edit_function 推荐用 old_string→new_string 精确替换（无需行号），改起来最快。\n"
+                "6. 若问题涉及【多个特性/多处修复】（如 'several features'、'all X'、'each Y'、\n"
+                "   'both A and B'），必须先用 set_plan 声明完整清单，逐项完成并把 done 置 true，\n"
+                "   交卷前复查无未完成项——不要只修一处就停。搜索代码里所有相关标记（如\n"
+                "   'Uncomment after X release' 这类注释）逐一处理。")
 
         self._initial_task_msg = user_content
         self.messages = [{"role": "user", "content": user_content}]

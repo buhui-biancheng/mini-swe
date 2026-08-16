@@ -82,7 +82,9 @@ class ToolRegistry:
             "report_graph_update": self._report_graph_update,  # Phase 5 JIT
             "run_test": self._run_test,
             "run_command": self._run_command,
+            "set_plan": self._set_plan,  # 2026-08-16 计划清单
         }
+        self.plan: list[dict] = []  # 2026-08-16 agent 声明的修复计划 [{task, done}]
 
     def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         if tool_name not in self._tools:
@@ -262,6 +264,21 @@ class ToolRegistry:
         if self.graph_manager is None:
             return {"error": "JIT 补全不可用：无 GraphManager"}
         return self.graph_manager.apply_jit_update(node_id, target, edge_type, evidence)
+
+    def _set_plan(self, plan: list) -> dict:
+        """声明/更新修复计划（2026-08-16 治本：多目标全覆盖）。
+
+        存储 {task, done} 列表；FSM 在交卷前检查未完成项。
+        返回当前计划 + 待办 + 完成数，让 agent 能复查。
+        """
+        self.plan = [{"task": p.get("task", ""), "done": bool(p.get("done", False))} for p in plan]
+        pending = [t["task"] for t in self.plan if not t["done"]]
+        return {
+            "plan": self.plan,
+            "pending": pending,
+            "pending_count": len(pending),
+            "done_count": sum(1 for t in self.plan if t["done"]),
+        }
 
     def _edit_function(self, file_path: str, old_string: str = None, new_string: str = None,
                        start_line: int = None, end_line: int = None, new_code: str = None,

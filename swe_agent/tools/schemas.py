@@ -55,6 +55,21 @@ class ReportGraphUpdateArgs(BaseModel):
     evidence: str = Field(description="证据说明（读了哪个文件哪段源码，如何确定目标）")
 
 
+class PlanItem(BaseModel):
+    """计划中的一项任务。"""
+    task: str = Field(description="任务描述")
+    done: bool = Field(description="是否已完成", default=False)
+
+
+class SetPlanArgs(BaseModel):
+    """声明/更新修复计划（2026-08-16：治本——让 agent 枚举全部待办并逐项覆盖）。
+
+    若问题涉及多个特性/多处修复（如 'several features'、'all X'），必须声明完整计划，
+    逐项完成并把 done 置 true，提交前复查无未完成项。每次调用替换整个计划。
+    """
+    plan: list[PlanItem] = Field(description="完整计划列表（每次调用替换）")
+
+
 # 工具名称到 Schema 的映射（Phase 2 简化：expand 并入 view_file，6 → 5）
 TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
@@ -63,6 +78,7 @@ TOOL_SCHEMAS = {
     "run_test": RunTestArgs,
     "run_command": RunCommandArgs,
     "report_graph_update": ReportGraphUpdateArgs,  # Phase 5 JIT
+    "set_plan": SetPlanArgs,  # 2026-08-16 计划清单（治本：多目标全覆盖）
 }
 
 
@@ -136,6 +152,14 @@ TOOLS = [
             "name": "run_command",
             "description": "在宿主机上运行终端命令（如 ls, cat, pwd），返回 stdout/stderr/exit_code",
             "parameters": RunCommandArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_plan",
+            "description": "声明/更新你的修复计划（task 列表 + 每项 done）。若问题涉及多个特性/多处修复，必须先声明完整清单、逐项完成并把 done 置 true、提交前复查无未完成项。每次调用替换整个计划",
+            "parameters": SetPlanArgs.model_json_schema(),
         },
     },
 ]

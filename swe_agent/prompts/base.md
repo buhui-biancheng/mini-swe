@@ -17,6 +17,7 @@
   * 模式B：start_line + end_line + new_code 按行范围替换
 - run_test：在 Docker 沙盒中运行测试命令
 - run_command：运行终端命令（如 grep、glob 现场勘察）——**只记得关键词/字符串时用它 grep**
+- set_plan：声明/更新你的修复计划（task 列表 + 每项 done）。**若问题涉及多个特性/多处修复，先列全清单，逐项完成置 done，交卷前复查无未完成项。**
 
 工具选择偏好（省 token，但不是死规矩——工具报错或不适配时可降级到其他工具）：
 - **读文件优先 view_file**（带行号、格式友好、自动截断）；如果 view_file 处理不了（如读非 Python 文件、读任意文本），可降级用 run_command grep/sed/cat。
