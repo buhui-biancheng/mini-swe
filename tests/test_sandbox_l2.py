@@ -22,7 +22,11 @@ def real_project(tmp_path):
 
 class TestRunCommandSandbox:
     def test_sandbox_run_command_goes_to_container(self, real_project, monkeypatch):
-        """sandbox 模式下 run_command 走容器（不碰宿主机）。"""
+        """sandbox 模式下 run_command 走容器（不碰宿主机）。
+
+        2026-08-14 改造：非 git 命令一律进容器（断网 + 依赖环境），
+        sandbox 挂载的是工作副本 ws。
+        """
         from swe_agent.sandbox.l1_sandbox import L1Sandbox
         from swe_agent.tools.registry import ToolRegistry
 
@@ -30,9 +34,9 @@ class TestRunCommandSandbox:
         ws = sb.create(task_id="t_rc_1")
         reg = ToolRegistry(skeleton_text="", code_dir=ws, sandbox=True)
 
-        # monkeypatch run_in_docker 验证被调用
+        # monkeypatch run_in_docker 验证被调用（2026-08-14 起带 python_version/packages/reuse kwargs）
         called = {}
-        def fake_docker(code_dir, command, timeout=60):
+        def fake_docker(code_dir, command, *a, **k):
             called["code_dir"] = code_dir
             called["command"] = command
             return SimpleNamespace(stdout="ok", stderr="", exit_code=0)
@@ -45,8 +49,12 @@ class TestRunCommandSandbox:
         sb.cleanup()
         print("✅ sandbox run_command 走容器（挂载工作副本）")
 
-    def test_nonsandbox_run_command_stays_host(self, real_project, monkeypatch):
-        """非沙盒模式 run_command 保持宿主机执行（兼容）。"""
+    def test_nonsandbox_git_command_stays_host(self, real_project, monkeypatch):
+        """非沙盒模式下 git 命令留宿主执行（worktree 对象库在宿主主仓库）。
+
+        2026-08-14 改造后：非 git 命令一律进容器；git 命令留宿主（容器内 git
+        用不了 worktree 的 .git 文件）。本测试用 git 命令验证宿主路径。
+        """
         from swe_agent.tools.registry import ToolRegistry
         reg = ToolRegistry(skeleton_text="", code_dir=str(real_project), sandbox=False)
         called = {}
@@ -54,9 +62,10 @@ class TestRunCommandSandbox:
             called["called"] = True
             return SimpleNamespace(stdout="", stderr="", exit_code=0)
         monkeypatch.setattr("swe_agent.sandbox.docker_runner.run_in_docker", fake_docker)
-        result = json.loads(reg.execute("run_command", {"command": "echo hi"}))
-        assert "called" not in called, "非沙盒不应走容器"
-        print("✅ 非沙盒 run_command 保持宿主机")
+        result = json.loads(reg.execute("run_command", {"command": "git status"}))
+        assert "called" not in called, "git 命令应留宿主执行"
+        assert "stdout" in result and "exit_code" in result
+        print("✅ 非沙盒 git 命令保持宿主机")
 
 
 class TestL2ContainerProps:

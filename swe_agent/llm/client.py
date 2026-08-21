@@ -130,15 +130,27 @@ class LLMClient:
 
         usage = {}
         if response.usage:
+            # 缓存命中统计（2026-08-21 兼容 opencode zen/go 网关）：
+            # DeepSeek 官方直连返回顶层 prompt_cache_hit_tokens；
+            # zen/go 等 OpenAI 兼容网关不填该字段，改填 prompt_tokens_details.cached_tokens。
+            # 两者都取（顶层字段优先，缺失时用 details），都不填则 0。
+            _cached = int(getattr(response.usage, "prompt_cache_hit_tokens", 0) or 0)
+            _details = getattr(response.usage, "prompt_tokens_details", None)
+            if _cached == 0 and _details is not None:
+                if hasattr(_details, "cached_tokens"):
+                    _cached = int(_details.cached_tokens or 0)
+                elif isinstance(_details, dict):
+                    _cached = int(_details.get("cached_tokens", 0) or 0)
             usage = {
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
                 # DeepSeek 官方缓存字段（2026-08-08 对照官方文档）：
                 # prompt_cache_hit_tokens = 命中上下文缓存的 token 数（顶层字段）
-                # 注：openai 兼容的 prompt_tokens_details.cached_tokens 不填充
-                "prompt_cache_hit_tokens": getattr(response.usage, "prompt_cache_hit_tokens", 0) or 0,
-                "prompt_cache_miss_tokens": getattr(response.usage, "prompt_cache_miss_tokens", 0) or 0,
+                "prompt_cache_hit_tokens": _cached,
+                "prompt_cache_miss_tokens": int(getattr(response.usage, "prompt_cache_miss_tokens", 0) or 0),
+                # TokenBudget 的 details 分支兜底（client 透传，双保险）
+                "prompt_tokens_details": {"cached_tokens": _cached} if _cached else None,
             }
 
         # DeepSeek thinking 模式返回 reasoning_content，需要传回

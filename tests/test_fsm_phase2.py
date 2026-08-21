@@ -148,9 +148,13 @@ class TestFailPathInjection:
 
 class TestRollback:
     def test_impact_circuit_breaker_restores_snapshot(self, bug_project, monkeypatch):
-        """影响面 ≥ 阈值 → ROLLBACK：恢复初始快照 + 重新规划。"""
-        fsm, _ = _make_fsm(bug_project, monkeypatch, docker_seq=[1, 0], max_retries=1)
-        fsm.agent_config.impact_threshold = 0  # 任何影响面都熔断
+        """高影响 + 失败数未优于历史最优（≥2 次失败）→ ROLLBACK：恢复初始快照 + 重新规划。
+
+        2026-08-14 语义：影响面是"旁路信号"而非独立开关——第 1 次失败不触发回滚，
+        只有第 2 次失败且失败数未变好时才回滚（避免误杀合法大重构）。
+        """
+        fsm, _ = _make_fsm(bug_project, monkeypatch, docker_seq=[1, 1, 0], max_retries=1)
+        fsm.agent_config.impact_threshold = 0  # 任何影响面都算高影响
         _mock_chat(fsm)
 
         bug_file = os.path.join(str(bug_project), "bug.py")
@@ -186,6 +190,60 @@ class TestRollback:
         # 成功路径计数器清零
         assert fsm.rollback_count == 0
         assert fsm._check_fail_count == 0  # check_pass 后清零
+
+    def test_write_file_created_rollback_state_machine_unchanged(self, bug_project, monkeypatch):
+        """write_file 新建文件参与回滚：状态机行为与无新建文件时完全一致。
+
+        对比有/无 created 文件两种场景（同一回滚路径）：
+        - rollback 触发的状态机次数一致（rollback_count 在重定位时都是 1）
+        - 新建文件被删除（回滚=删除），原文件快照正常恢复
+        - 回滚后流转到 success（状态机不受影响）
+        """
+        def run_case(with_created_file):
+            fsm, _ = _make_fsm(bug_project, monkeypatch, docker_seq=[0], max_retries=1)
+            observed = {}
+
+            def fake_chat(messages, tools=None, tool_executor=None, max_rounds=5,
+                          usage_callback=None, thinking=False, reasoning_effort="high"):
+                if "rollback_count" not in observed:
+                    # 回滚后第一次定位时捕获（成功路径会在 test_pass 清零，这里先截获）
+                    observed["rollback_count"] = fsm.rollback_count
+                    observed["state"] = fsm.state
+                if usage_callback:
+                    usage_callback({})
+                return ("done", messages)
+
+            fsm.client.chat_with_tools = fake_chat
+
+            bug_file = os.path.join(str(bug_project), "bug.py")
+            fsm.checkpoint.save_initial(bug_file)
+            with open(bug_file, "w", encoding="utf-8") as f:
+                f.write("def add(a, b):\n    return a * b\n")  # 模拟编辑
+            new_file = None
+            if with_created_file:
+                new_file = os.path.join(str(bug_project), "helper.py")
+                fsm.checkpoint.save_initial(new_file)  # 不存在 → created
+                with open(new_file, "w", encoding="utf-8") as f:
+                    f.write("def helper():\n    return 1\n")
+                fsm._edited_ranges = [(bug_file, 1, 2), (new_file, 1, 2)]
+
+            fsm.machine.set_state("rollback")
+            fsm._on_enter_rollback()
+            return fsm, observed, new_file
+
+        fsm_no, obs_no, _ = run_case(False)
+        fsm_yes, obs_yes, new_file = run_case(True)
+
+        # 状态机行为完全一致：回滚次数、重定位时状态、最终结果
+        assert obs_yes == obs_no, f"新建文件改变了回滚行为: {obs_yes} vs {obs_no}"
+        assert obs_yes["rollback_count"] == 1, "回滚计数应恰好 +1"
+        assert obs_yes["state"] == "locate"
+        assert fsm_yes.state == fsm_no.state == "success"
+        # write_file 新建文件回滚后删除；原文件恢复初始快照
+        assert not os.path.exists(new_file), "write_file 新建文件回滚后应被删除"
+        assert new_file not in fsm_yes.checkpoint.created, "restore 后 created 应清空"
+        with open(os.path.join(str(bug_project), "bug.py"), encoding="utf-8") as f:
+            assert "return a - b" in f.read(), "原文件应恢复初始快照"
 
     def test_rollback_degrades_dp_to_greedy(self, bug_project, monkeypatch):
         """DP 反复失效（回滚超限）→ 降级 Greedy → 成功回写 → 切回 DP。"""

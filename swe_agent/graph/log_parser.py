@@ -145,10 +145,14 @@ def _extract_failures_segment(stdout: str, blocks: list[tuple[int, int]],
     return seg
 
 
-def save_full_log(stdout: str, graph_dir: str) -> str:
-    """完整日志落盘到 graph_dir/last_test.log，返回路径。"""
+def save_full_log(stdout: str, graph_dir: str, filename: str = "last_test.log") -> str:
+    """完整日志落盘到 graph_dir/<filename>，返回路径。
+
+    filename 默认 last_test.log（FSM 测试失败落盘）；终端工具大输出落盘
+    复用本函数（run_command → last_cmd.log）。
+    """
     os.makedirs(graph_dir, exist_ok=True)
-    path = os.path.join(graph_dir, "last_test.log")
+    path = os.path.join(graph_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
         f.write(stdout)
     return path

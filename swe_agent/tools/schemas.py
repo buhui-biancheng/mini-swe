@@ -42,6 +42,16 @@ class RunTestArgs(BaseModel):
     command: str = Field(description="要执行的测试命令，如 'pytest test.py'")
 
 
+class WriteFileArgs(BaseModel):
+    """写文件（新建或整文件覆写，2026-08-21 借鉴 Claude Code Write 契约）。
+
+    用于创建新文件或整体重写小文件；修改现有代码请用 edit_function（精准编辑）。
+    content 必须是文件的完整内容（不是片段）。
+    """
+    file_path: str = Field(description="要写入的文件路径（不存在则创建，自动建父目录）")
+    content: str = Field(description="文件的完整内容（整文件创建/覆写，不是片段）")
+
+
 class RunCommandArgs(BaseModel):
     """在宿主机上运行终端命令。"""
     command: str = Field(description="要执行的终端命令，如 'ls -la'")
@@ -75,6 +85,7 @@ TOOL_SCHEMAS = {
     "search_function": SearchFunctionArgs,
     "view_file": ViewFileArgs,
     "edit_function": EditFunctionArgs,
+    "write_file": WriteFileArgs,  # 2026-08-21 写文件（新建/整文件覆写）
     "run_test": RunTestArgs,
     "run_command": RunCommandArgs,
     "report_graph_update": ReportGraphUpdateArgs,  # Phase 5 JIT
@@ -104,7 +115,11 @@ def validate_tool_args(tool_name: str, args: dict[str, Any]) -> tuple[bool, Opti
         return False, error_msg, None
 
 
-# Function Calling 工具定义（OpenAI 格式，Phase 2 简化：5 工具）
+# Function Calling 工具定义（OpenAI 格式）
+# 2026-08-21 工具集精简：report_graph_update（JIT 反射补全，SWE-bench 静态代码
+# 0 使用）不再暴露给 LLM——TOOL_SCHEMAS 保留（registry 内部实现与测试仍可用）。
+# search_function 保留（flask 类符号名型实例实测使用：flask4074 12 次）。
+# 7 工具 = 读×2/写/改/终端×2/方案。
 TOOLS = [
     {
         "type": "function",
@@ -133,6 +148,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "write_file",
+            "description": "写文件：新建文件或整文件覆写（content 必须是完整内容）。只用于创建新文件/整体重写小文件；修改现有代码用 edit_function",
+            "parameters": WriteFileArgs.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_test",
             "description": "在 Docker 沙盒中运行测试命令，返回 stdout/stderr/exit_code",
             "parameters": RunTestArgs.model_json_schema(),
@@ -141,16 +164,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "report_graph_update",
-            "description": "JIT 图谱补全：提交反射调用补全建议（node_id 是 is_reflection=true 的节点，target 是实际调用目标），系统验证后写入图",
-            "parameters": ReportGraphUpdateArgs.model_json_schema(),
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "run_command",
-            "description": "在宿主机上运行终端命令（如 ls, cat, pwd），返回 stdout/stderr/exit_code",
+            "description": "在宿主机上运行终端命令（如 ls, cat, pwd, grep），返回 stdout/stderr/exit_code",
             "parameters": RunCommandArgs.model_json_schema(),
         },
     },

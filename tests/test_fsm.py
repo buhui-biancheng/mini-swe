@@ -62,8 +62,8 @@ class TestWatchdog:
     def test_record_state_normal(self):
         """测试正常状态记录。"""
         w = Watchdog()
-        # 连续 5 次进入同一状态才触发
-        for _ in range(4):
+        # 连续 6 次进入同一状态才触发（2026-08-13 修复，原 5 次误杀正常回环）
+        for _ in range(5):
             assert w.record_state("locate") is False
         assert w.record_state("locate") is True
 

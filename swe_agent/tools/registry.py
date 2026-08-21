@@ -18,6 +18,37 @@ from swe_agent.sandbox.docker_runner import run_in_docker
 # token 膨胀主因。截断保留尾部（pytest 失败摘要通常在末尾）+ clipped 标记。
 OUTPUT_TRUNCATE_CHARS = 4000
 
+# 工具输出落盘（2026-08-21 第三层，对齐 Claude Code "output too large"）：
+# 超出截断阈值但 ≤ 落盘阈值 → 智能截断返回；超过落盘阈值 → 不塞上下文，
+# 完整输出落盘 .graph/last_<name>.log，返回提示（大小/行数/路径 + 尾部摘录），
+# AI 用 view_file 按行号自读。
+OUTPUT_DUMP_CHARS = 20000      # 落盘阈值（默认；ToolRegistry 可配置）
+OUTPUT_DUMP_TAIL_CHARS = 1200  # 落盘时返回的尾部摘录长度（统计行/最终异常在尾部）
+
+
+def _dump_output(text: str, name: str, code_dir: str) -> tuple[str, int, int]:
+    """完整输出落盘到 code_dir/.graph/last_<name>.log，返回 (路径, 大小KB, 行数)。"""
+    from swe_agent.graph.log_parser import save_full_log
+    path = save_full_log(text, os.path.join(code_dir, ".graph"), f"last_{name}.log")
+    lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+    return path, len(text.encode("utf-8")) // 1024, lines
+
+
+def _process_output(text: str, name: str, truncate_limit: int, code_dir: str,
+                    dump_chars: int = OUTPUT_DUMP_CHARS) -> str:
+    """终端工具输出统一处理（三层）：
+    小输出原样返回；中输出智能截断（保失败段+尾部）；超大输出落盘 + 提示自读。
+    """
+    if text is None:
+        return ""
+    if len(text) > dump_chars:
+        path, size_kb, lines = _dump_output(text, name, code_dir)
+        return (f"[output too large] 完整输出 {size_kb} KB / {lines} 行 已写入 {path}，"
+                f"请用 view_file(file_path=\"{path}\", start_line=..., end_line=...) 按行号读取。\n"
+                f"尾部摘录（最后 {OUTPUT_DUMP_TAIL_CHARS} 字符）：\n"
+                f"{text[-OUTPUT_DUMP_TAIL_CHARS:]}")
+    return _truncate_output(text, truncate_limit)
+
 
 def _truncate_output(text: str, limit: int = OUTPUT_TRUNCATE_CHARS) -> str:
     """智能截断工具输出（2026-08-13 边界处理）：
@@ -60,7 +91,8 @@ class ToolRegistry:
                  python_version: str = "3.11", packages: list[str] | None = None,
                  graph_index=None, fence=None, graph_manager=None,
                  sandbox: bool = False, graph_level: int = 2,
-                 block_network: bool = False):
+                 block_network: bool = False,
+                 output_dump_chars: int = OUTPUT_DUMP_CHARS):
         self.skeleton_text = skeleton_text
         self.code_dir = os.path.abspath(code_dir)
         self.python_version = python_version
@@ -75,10 +107,12 @@ class ToolRegistry:
         # 2026-08-13 官方模式网络防火墙：run_command 是宿主机 shell，
         # 不拦会成作弊通道（curl 下载上游题解）。block_network=True 时禁网络命令。
         self.block_network = block_network
+        self.output_dump_chars = output_dump_chars  # 2026-08-21 第三层：大输出落盘阈值
         self._tools: dict[str, callable] = {
             "search_function": self._search_function,
             "view_file": self._view_file,
             "edit_function": self._edit_function,
+            "write_file": self._write_file,  # 2026-08-21 写文件（新建/整文件覆写）
             "report_graph_update": self._report_graph_update,  # Phase 5 JIT
             "run_test": self._run_test,
             "run_command": self._run_command,
@@ -130,6 +164,13 @@ class ToolRegistry:
         abs_path = os.path.abspath(file_path)
         if os.path.exists(abs_path):
             return abs_path
+        # 2026-08-21 容器路径兼容：run_command 输出是 /workspace/...（容器内路径），
+        # LLM 可能原样传给 view_file/edit_file——映射回宿主机 code_dir（避免走 basename
+        # walk 误匹配同名文件）
+        if file_path.startswith("/workspace"):
+            mapped = os.path.join(self.code_dir, file_path[len("/workspace"):].lstrip("/"))
+            if os.path.exists(mapped):
+                return mapped
         abs_path = os.path.join(self.code_dir, file_path)
         if os.path.exists(abs_path):
             return abs_path
@@ -400,6 +441,62 @@ class ToolRegistry:
                + "\n请复制文件中的精确文本（含缩进与空行）。")
         return {"error": msg}
 
+    def _write_file(self, file_path: str, content: str) -> dict:
+        """写文件：新建或整文件覆写（2026-08-21 借鉴 Claude Code Write 契约）。
+
+        定位：创建新文件 / 整体重写小文件；修改现有代码用 edit_function（精准编辑）。
+        content 必须是完整内容（不是片段）。围栏与 edit_function 一致：tests/ 只读、
+        敏感路径（.env/.graph/.git）禁写。
+        """
+        if len(content) > 50000:
+            return {"error": f"content 过大（{len(content)} 字符 > 50000 上限）"
+                             "——请用 edit_function 分块修改"}
+
+        abs_path = os.path.abspath(file_path)
+        existed = os.path.exists(abs_path)
+        if not existed:
+            candidate = os.path.join(self.code_dir, file_path)
+            if os.path.exists(candidate):
+                abs_path, existed = candidate, True
+            else:
+                abs_path = candidate  # 新文件：落在 code_dir 下
+
+        # 围栏：禁写测试文件（与 edit_function 同规则，防自证陷阱）
+        _rp = os.path.basename(abs_path)
+        _d = os.path.basename(os.path.dirname(abs_path))
+        if _d in ("tests", "test", "testing") or _rp.startswith("test_"):
+            return {"error": "不允许写入测试文件（tests/ 目录只读——你的修改只能针对业务代码）",
+                    "stdout": "", "stderr": "测试文件禁止写入", "exit_code": -1}
+        # 围栏：敏感路径禁写（.env/.graph/.git）
+        _lower = abs_path.lower()
+        for _bad in (os.sep + ".git" + os.sep, os.sep + ".graph" + os.sep,
+                     os.sep + ".env"):
+            if _bad in _lower:
+                return {"error": f"禁止写入敏感路径: {file_path}"}
+
+        old_lines = 0
+        if existed:
+            try:
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    old_lines = len(f.readlines())
+            except Exception:
+                pass
+        try:
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            return {"error": f"写入失败: {e}"}
+
+        new_lines = content.count("\n") + (0 if content.endswith("\n") else 1)
+        return {
+            "success": True, "file": file_path,
+            "mode": "overwrite" if existed else "create",
+            "old_lines": old_lines, "new_lines": new_lines,
+            "start_line": 1, "end_line": max(1, new_lines),
+            "excerpt": content[:400],
+        }
+
     def _run_test(self, command: str) -> dict:
         # 将命令中的宿主机绝对路径转换为容器内路径
         container_command = command
@@ -425,7 +522,8 @@ class ToolRegistry:
             reuse=True,  # 2026-08-13 容器复用
         )
         return {
-            "stdout": _truncate_output(result.stdout),
+            "stdout": _process_output(result.stdout, "test", 4000, self.code_dir,
+                                      self.output_dump_chars),
             "stderr": _truncate_output(result.stderr, 1500),
             "exit_code": result.exit_code,
         }
@@ -454,7 +552,8 @@ class ToolRegistry:
                 r = run_in_docker(self.code_dir, container_cmd, timeout=60,
                                   python_version=self.python_version,
                                   packages=self.packages, reuse=True)
-                return {"stdout": _truncate_output(r.stdout, 8000),
+                return {"stdout": _process_output(r.stdout, "cmd", 8000, self.code_dir,
+                                                  self.output_dump_chars),
                         "stderr": _truncate_output(r.stderr, 1500),
                         "exit_code": r.exit_code}
             except Exception as e:
@@ -465,7 +564,9 @@ class ToolRegistry:
         if self.sandbox:
             from swe_agent.sandbox.docker_runner import run_in_docker
             r = run_in_docker(self.code_dir, command, timeout=60)
-            return {"stdout": _truncate_output(r.stdout, 8000), "stderr": _truncate_output(r.stderr, 1500),
+            return {"stdout": _process_output(r.stdout, "cmd", 8000, self.code_dir,
+                                              self.output_dump_chars),
+                    "stderr": _truncate_output(r.stderr, 1500),
                     "exit_code": r.exit_code}
 
         # 危险命令
@@ -485,7 +586,13 @@ class ToolRegistry:
                     # git show <tag>:file 能直接读出未来版本实现（实测 agent 用过）
                     "git show", "git log", "git tag", "git branch",
                     "git rev-list", "git ls-remote", "git describe", "git blame",
-                    "HEAD~", "^HEAD"]
+                    "HEAD~", "^HEAD",
+                    # 2026-08-21 堵工作区/历史写入（评测模式专用，正常模式不受影响）：
+                    # git checkout <origin/main> -- <file> 可直接检出修复后代码（标准答案）；
+                    # git reset/restore/switch/cherry-pick 同理。
+                    # （git stash 假绿通道不堵：FTP 第三方验证兜底，评测判定不受影响）
+                    "git checkout", "git reset", "git restore", "git switch",
+                    "git cherry-pick"]
             if any(k in command.lower() for k in _net):
                 return {"error": "网络命令被禁止（官方模式离线）——请只使用本地仓库代码推理，"
                                 "不要尝试联网获取外部代码",
@@ -502,8 +609,9 @@ class ToolRegistry:
                 cwd=self.code_dir,
             )
             return {
-                "stdout": result.stdout[:2000] if result.stdout else "",
-                "stderr": result.stderr[:500] if result.stderr else "",
+                "stdout": _process_output(result.stdout, "cmd", 2000, self.code_dir,
+                                          self.output_dump_chars),
+                "stderr": _truncate_output(result.stderr, 500),
                 "exit_code": result.returncode,
             }
         except subprocess.TimeoutExpired:

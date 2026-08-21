@@ -91,7 +91,7 @@ class Watchdog:
 
     使用纯决策引擎进行检测：
     1. 重复调用检测（最近 3 次相同工具+参数）
-    2. 状态进入检测（最近 5 次进入同一状态）
+    2. 状态进入检测（同一状态连续 6 次，2026-08-13 修复：原 5 次误杀正常回环）
     3. 无进展检测（连续多轮没有编辑）
     4. 低效编辑检测（编辑成功率过低）
     """
@@ -123,8 +123,10 @@ class Checkpoint:
     """Checkpoint: 代码快照机制（Phase 2 作为 mock 快照，Phase 4 换 SnapshotManager）。
 
     首次编辑前保存初始态（save_initial），ROLLBACK 恢复初始态。
+    created：2026-08-21 write_file 新建的文件（编辑前不存在）——回滚时删除而非恢复。
     """
     snapshots: dict[str, str] = field(default_factory=dict)
+    created: set = field(default_factory=set)
 
     def save(self, file_path: str) -> None:
         """保存文件快照。"""
@@ -139,14 +141,25 @@ class Checkpoint:
         """首次编辑前记录初始态（仅当该文件尚未快照时保存）。
 
         保证 ROLLBACK 恢复的是"编辑前"的初始状态，而非编辑后的状态。
+        文件尚不存在（write_file 新建）→ 记入 created，回滚时删除。
         """
         abs_path = os.path.abspath(file_path)
         if abs_path not in self.snapshots:
-            self.save(file_path)
+            if os.path.exists(abs_path):
+                self.save(file_path)
+            else:
+                self.created.add(abs_path)
 
     def restore(self, file_path: str) -> bool:
-        """恢复文件快照。"""
+        """恢复文件快照；新建文件（created）则删除。"""
         abs_path = os.path.abspath(file_path)
+        if abs_path in self.created:
+            self.created.discard(abs_path)
+            try:
+                os.remove(abs_path)
+                return True
+            except Exception:
+                return False
         if abs_path in self.snapshots:
             try:
                 with open(abs_path, 'w', encoding='utf-8') as f:
@@ -159,6 +172,7 @@ class Checkpoint:
     def clear(self) -> None:
         """清除所有快照。"""
         self.snapshots.clear()
+        self.created.clear()
 
 
 # 2026-08-13 图上下文瘦身：L1 邻域节点上限（seed 优先 + 高 in_degree 核心枢纽）
@@ -293,6 +307,7 @@ class AgentFSM:
             sandbox=self.sandbox,
             graph_level=self.graph_level,
             block_network=self.official_mode,  # 2026-08-13 官方模式封 run_command 网络
+            output_dump_chars=self.agent_config.output_dump_chars,  # 2026-08-21 第三层
         )
 
         # 防死循环、快照、语法防火墙
@@ -485,12 +500,21 @@ class AgentFSM:
 
         LLM 可能传相对路径（如 "bug.py"），而 cwd 不一定等于 code_dir，
         直接 abspath 会解析到错误位置。统一先按 code_dir 兜底。
+        文件尚不存在时（write_file 新建）：相对路径仍按 code_dir 兜底，
+        保证快照/回滚记录的是 write_file 实际落盘的位置。
+        2026-08-21：容器路径兼容——run_command 在容器里执行，输出里是
+        /workspace/... 路径，LLM 可能原样传给 view_file/edit_file，
+        映射回宿主机 code_dir（原有解析逻辑保留，仅追加映射分支）。
         """
         abs_path = os.path.abspath(file_path)
         if os.path.exists(abs_path):
             return abs_path
+        if file_path.startswith("/workspace"):
+            mapped = os.path.join(self.code_dir, file_path[len("/workspace"):].lstrip("/"))
+            if os.path.exists(mapped):
+                return mapped
         joined = os.path.join(self.code_dir, file_path)
-        if os.path.exists(joined):
+        if os.path.exists(joined) or not os.path.isabs(file_path):
             return os.path.abspath(joined)
         return abs_path
 
@@ -521,8 +545,9 @@ class AgentFSM:
         """调用 LLM 进行工具调用回合（LOCATE 与 PATCH 重修复共用）。"""
         self._trim_history()
         def tool_executor(tool_name: str, arguments: dict) -> str:
-            # 编辑前先记录初始快照（保证 ROLLBACK 能恢复编辑前状态）
-            if tool_name == "edit_function":
+            # 编辑前先记录初始快照（保证 ROLLBACK 能恢复编辑前状态；
+            # write_file 新建的文件由 Checkpoint 记入 created，回滚时删除）
+            if tool_name in ("edit_function", "write_file"):
                 fp = self._resolve_file(arguments.get("file_path", ""))
                 self.checkpoint.save_initial(fp)
 
@@ -566,7 +591,7 @@ class AgentFSM:
                 return json.dumps({"error": f"检测到重复调用: {tool_name}"})
 
             # 追踪 edit 操作（记录实际编辑范围，成功时给对应函数加权）
-            if tool_name == "edit_function":
+            if tool_name in ("edit_function", "write_file"):
                 is_success = "error" not in result_data
                 file_path = arguments.get("file_path", "")
                 self.watchdog.record_edit(file_path, is_success)
@@ -829,10 +854,11 @@ class AgentFSM:
         self._log_state_enter("check", self.attempt)
 
         # 1. 语法防火墙：ast.parse 毫秒级拦截，不进 Docker
-        files_to_check = [self.bug_file]
+        # 只检查 .py 文件（write_file 可写非 Python 文件如 .json/.txt，用 ast 检查会误报）
+        files_to_check = [fp for fp in [self.bug_file] if fp.endswith(".py")]
         for fp, _, _ in self._edited_ranges:
             resolved = self._resolve_file(fp)
-            if resolved != self.bug_file:
+            if resolved != self.bug_file and resolved.endswith(".py"):
                 files_to_check.append(resolved)
         syntax_errors = []
         for fp in files_to_check:
@@ -1216,9 +1242,9 @@ class AgentFSM:
         """ROLLBACK 状态：代价熔断，恢复初始快照 + 重置规划路径。"""
         self._log_state_enter("rollback", self.attempt)
 
-        # 恢复初始快照（所有被编辑文件）
+        # 恢复初始快照（所有被编辑文件 + write_file 新建文件——新建的回滚=删除）
         restored = 0
-        for path in list(self.checkpoint.snapshots):
+        for path in list(self.checkpoint.snapshots) + list(self.checkpoint.created):
             if self.checkpoint.restore(path):
                 restored += 1
         print(f"[ROLLBACK] 已恢复 {restored} 个文件的初始快照")

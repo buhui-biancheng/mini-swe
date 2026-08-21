@@ -85,10 +85,13 @@ class TestDecisionEngine:
             assert engine.record_tool_call("search_function", {"name": name}) is False
 
     def test_state_entry_repetition(self):
-        """测试状态进入重复检测。"""
+        """测试状态进入重复检测。
+
+        2026-08-13 修复：同一状态连续 6 次才触发（原 5 次会误杀正常回环）。
+        """
         engine = DecisionEngine(WatchdogConfig())
 
-        for _ in range(4):
+        for _ in range(5):
             assert engine.record_state_entry("locate") is False
         assert engine.record_state_entry("locate") is True
 

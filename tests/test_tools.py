@@ -79,7 +79,10 @@ class TestSchemas:
 
     def test_tools_list_length(self):
         # Phase 2 简化：6 → 5 工具；Phase 5 JIT：+report_graph_update → 6
-        assert len(TOOLS) == 6  # 2026-08-13：submit 移除（最简交卷=无工具调用）
+        # 2026-08-16：+set_plan → 7；2026-08-21：+write_file → 8
+        # 2026-08-21 精简：-search_function -report_graph_update → 6
+        #（读/写/改/终端×2/方案；registry 实现保留，schema 不暴露）
+        assert len(TOOLS) == 7
 
     def test_tools_have_correct_types(self):
         for tool in TOOLS:
@@ -187,3 +190,87 @@ class TestToolRegistry:
         )
         assert "stdout" in result
         assert "exit_code" in result
+
+
+class TestWriteFile:
+    """write_file 工具（2026-08-21）：新建 / 整文件覆写 / 围栏。"""
+
+    def test_create_new_file(self, registry, tmp_path):
+        target = os.path.join(tmp_path, "sub", "new_mod.py")
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": target, "content": "x = 1\n"}))
+        assert result.get("success") is True
+        assert result["mode"] == "create"
+        assert result["old_lines"] == 0
+        assert result["new_lines"] == 1
+        assert os.path.exists(target)
+        with open(target) as f:
+            assert f.read() == "x = 1\n"
+
+    def test_overwrite_existing(self, registry, sample_file):
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": sample_file, "content": "y = 2\n"}))
+        assert result.get("success") is True
+        assert result["mode"] == "overwrite"
+        assert result["old_lines"] >= 5
+        with open(sample_file) as f:
+            assert f.read() == "y = 2\n"
+
+    def test_relative_path_creates_under_code_dir(self, registry):
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": "brand_new.py", "content": "z = 3\n"}))
+        assert result.get("success") is True
+        target = os.path.join(registry.code_dir, "brand_new.py")
+        assert os.path.exists(target)
+        os.unlink(target)  # 清理
+
+    def test_reject_tests_dir(self, registry, tmp_path):
+        t = tmp_path / "tests" / "test_x.py"
+        t.parent.mkdir()
+        t.write_text("")
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": str(t), "content": "print(1)"}))
+        assert "error" in result
+        assert "测试文件" in result["error"]
+
+    def test_reject_env_file(self, registry, tmp_path):
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": str(tmp_path / ".env"), "content": "KEY=x"}))
+        assert "error" in result
+        assert "敏感路径" in result["error"]
+
+    def test_content_too_large(self, registry, tmp_path):
+        result = json.loads(registry.execute(
+            "write_file", {"file_path": str(tmp_path / "big.py"), "content": "x" * 60000}))
+        assert "error" in result
+        assert "过大" in result["error"]
+
+
+class TestCheckpointCreatedFile:
+    """Checkpoint 新建文件回滚（2026-08-21）：write_file 新建的文件，回滚 = 删除。"""
+
+    def test_rollback_deletes_created_file(self, tmp_path):
+        from swe_agent.fsm.agent_fsm import Checkpoint
+        cp = Checkpoint()
+        target = tmp_path / "new.py"
+        cp.save_initial(str(target))  # 文件尚不存在 → 记入 created
+        target.write_text("x = 1\n")
+        assert cp.restore(str(target)) is True
+        assert not target.exists()
+
+    def test_rollback_restores_existing_file(self, tmp_path):
+        from swe_agent.fsm.agent_fsm import Checkpoint
+        cp = Checkpoint()
+        target = tmp_path / "f.py"
+        target.write_text("old\n")
+        cp.save_initial(str(target))
+        target.write_text("new\n")
+        assert cp.restore(str(target)) is True
+        assert target.read_text() == "old\n"
+
+    def test_clear_resets_created(self, tmp_path):
+        from swe_agent.fsm.agent_fsm import Checkpoint
+        cp = Checkpoint()
+        cp.save_initial(str(tmp_path / "a.py"))
+        cp.clear()
+        assert not cp.created

@@ -35,6 +35,7 @@ class AgentConfig:
 
     # 日志解析器（Phase 2 模块 D）
     failures_segment_limit: int = 2000  # FAILURES 段截断上限（防上下文膨胀）
+    output_dump_chars: int = 20000  # 终端工具输出落盘阈值（2026-08-21 第三层：超过该值不截断返回，完整输出落盘 .graph/last_*.log + output too large 提示）
 
     # 盲区处理
     max_polymorphism_edges: int = 30  # 多态全笼罩最大边数（防止爆炸）
